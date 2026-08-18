@@ -7,7 +7,7 @@ images. See `BRIEF.md` for requirements.
 
 ## Stack
 - Python 3.14 (only toolchain on this workstation)
-- `mcp` (FastMCP) + `huggingface_hub` (InferenceClient)
+- `mcp` (MCPServer, mcp 2.x) + `huggingface_hub` (InferenceClient)
 - stdlib for image input parsing (urllib, base64, mimetypes) — no extra deps
 - `pyproject.toml` (setuptools) with console-script entry point `hf-vision-mcp`
 - Tests: stdlib `unittest` (zero dev deps)

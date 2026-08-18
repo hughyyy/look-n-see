@@ -75,7 +75,7 @@ images, and the results come back as tool results the main model can act on.
 
 ## Stack
 - Python 3.14 (only available toolchain on this workstation)
-- `mcp` (FastMCP), `huggingface_hub`
+- `mcp` (MCPServer, mcp 2.x), `huggingface_hub`
 - pip + venv, `pyproject.toml`
 
 ## Non-goals (initial implementation)

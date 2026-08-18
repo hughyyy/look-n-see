@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hf-vision-mcp"
+version = "0.1.0"
+description = "MCP server exposing a vision model via HuggingFace Inference"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.2",
+    "huggingface_hub>=0.24",
+]
+
+[project.scripts]
+hf-vision-mcp = "hf_vision_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
