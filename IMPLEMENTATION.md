@@ -66,8 +66,13 @@ The server is registered as a user-level MCP server so agents can call it from
 any working directory.
 
 - Config: `~/.omp/agent/mcp.json` →
-  `hf-vision` (stdio, `.venv/bin/hf-vision-mcp`, `HF_TOKEN` copied from the
-  launching shell via the `"HF_TOKEN": "HF_TOKEN"` env pattern, `timeout: 120000`).
+  `hf-vision` (stdio, `.venv/bin/hf-vision-mcp`,
+  `HF_TOKEN` resolved from OMP's own HuggingFace credential store via
+  `!/home/bernie/.local/bin/omp token huggingface`, `timeout: 120000`).
+- The `!` env indirection runs `omp token huggingface` (OMP's supported way to
+  read the stored `huggingface` api_key in `~/.omp/agent/agent.db`) and injects
+  the trimmed output as `HF_TOKEN` — no token duplication, no re-export, and it
+  tracks the credential OMP itself uses.
 - Why `timeout: 120000`: OMP's default MCP request timeout is 30s, too short for
   serverless inference on a vision model; 120s gives headroom.
 - After editing, run `/mcp reload`, then `/mcp test hf-vision` and `/mcp list`
