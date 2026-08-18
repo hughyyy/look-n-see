@@ -61,6 +61,22 @@ tests/
 - Invalid image input → descriptive tool error.
 - HF failures → readable message (model target + status), not a traceback.
 
+## Oh My Pi (OMP) integration
+The server is registered as a user-level MCP server so agents can call it from
+any working directory.
+
+- Config: `~/.omp/agent/mcp.json` →
+  `hf-vision` (stdio, `.venv/bin/hf-vision-mcp`, `HF_TOKEN` copied from the
+  launching shell via the `"HF_TOKEN": "HF_TOKEN"` env pattern, `timeout: 120000`).
+- Why `timeout: 120000`: OMP's default MCP request timeout is 30s, too short for
+  serverless inference on a vision model; 120s gives headroom.
+- After editing, run `/mcp reload`, then `/mcp test hf-vision` and `/mcp list`
+  in an OMP session. The three tools (`describe_image`, `analyze_screenshot`,
+  `ask_about_image`) then appear alongside built-in tools for the main agent
+  and subagents.
+- To make it project-scoped instead of user-scoped, move the same block to
+  `.omp/mcp.json` in this repo.
+
 ## Verification
 - Offline (this session): `compileall`, server starts and registers 3 tools,
   image parsing unit tests (file/data-uri/URL), prompts unit tests, mocked
