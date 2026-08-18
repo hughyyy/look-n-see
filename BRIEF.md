@@ -46,18 +46,23 @@ images, and the results come back as tool results the main model can act on.
 - Long-term goal: repeated calls share context — the server keeps a
   multi-turn conversation with the vision model so later calls can reference
   earlier images/answers.
-- Planned shape (design seam only now):
+- Planned shape (design seam only now), **configurable — default multi-turn**:
   - Optional `session_id` on every tool; omitted = stateless (current behavior).
-  - Server keeps in-memory message history per session (one MCP client per
-    stdio process, so per-process dict is natural); appends
-    image+prompt+response each turn and sends full history within the
-    context window.
+  - Two modes (env `VISION_SESSION_MODE`):
+    - `history` (default): full multi-turn chat history with the vision model —
+      later calls reference earlier images/answers.
+    - `context`: fetch/accumulate reference — inject a rolling context block
+      into each call instead of full raw history.
+    - Configurable per deployment; default `history`.
+  - Server keeps in-memory state per session (one MCP client per stdio
+    process, so per-process dict is natural); appends the turn and sends
+    history/context within the window.
   - A `clear_session`/`reset_session` tool; context-budget trimming when
     approaching the window limit.
   - Build the "prompt → model call" path as a pure function of
-    (messages, image) in the initial implementation so history injection is a
-    later, additive change. `InferenceClient.chat_completion` already supports
-    multi-turn image content.
+    (messages, image) in the initial implementation so history/context injection
+    is a later, additive change. `InferenceClient.chat_completion` already
+    supports multi-turn image content.
 
 ### Deployment
 - Local now (stdio subprocess, runnable entry point), service-ready later:
