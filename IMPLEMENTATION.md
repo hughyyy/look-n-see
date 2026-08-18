@@ -33,7 +33,7 @@ tests/
 | Var | Default | Purpose |
 |---|---|---|
 | `HF_TOKEN` | — | HF auth (required for inference) |
-| `VISION_MODEL` | `google/gemma-4-12B-it` | model id for serverless inference |
+| `VISION_MODEL` | `google/gemma-4-26B-A4B-it` | model id for serverless inference |
 | `HF_ENDPOINT` | — | dedicated endpoint URL; overrides `VISION_MODEL` target |
 | `VISION_MAX_TOKENS` | `1024` | max generated tokens |
 | `VISION_TIMEOUT` | `60` | per-request timeout (s) |

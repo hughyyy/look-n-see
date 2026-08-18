@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-DEFAULT_MODEL = "google/gemma-4-12B-it"
+DEFAULT_MODEL = "google/gemma-4-26B-A4B-it"
 
 
 @dataclass(frozen=True)

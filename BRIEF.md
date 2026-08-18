@@ -33,14 +33,16 @@ images, and the results come back as tool results the main model can act on.
   rigid schema). No separate OCR tool — prompt-driven Q&A covers text extraction.
 
 ### Model
-- Configurable via env (`VISION_MODEL`), default `google/gemma-4-12B-it`
-  (Gemma 4 12B Unified, instruct). Apache-2.0, `endpoints_compatible` on HF
-  serverless inference.
-- Rationale vs Qwen2.5-VL-7B: 256K vs ~65K context window (matters for the
-  session-state feature below), newer (2026 vs Jan 2025), configurable
-  thinking mode, encoder-free architecture. Qwen2.5-VL remains a valid
-  override via `VISION_MODEL` (stronger documented OCR/UI-agent benchmarks,
-  lighter at 7B).
+- Configurable via env (`VISION_MODEL`), default `google/gemma-4-26B-A4B-it`
+  (Gemma 4 26B A4B MoE, instruct). Apache-2.0, served on HF serverless
+  inference today (verified against `router.huggingface.co/v1/models`).
+- Note: `google/gemma-4-12B-it` (the originally chosen 12B Unified) is
+  `any-to-any` and NOT on the serverless router — it needs a dedicated
+  Inference Endpoint (`HF_ENDPOINT`). 26B A4B is the same Gemma 4 family,
+  256K context, MoE (3.8B active → fast), MMMU-Pro 73.8%.
+- Other serverless vision options via `VISION_MODEL`:
+  `google/gemma-4-31B-it`, `Qwen/Qwen3-VL-30B-A3B-Instruct`,
+  `Qwen/Qwen2.5-VL-72B-Instruct`.
 
 ### Future: session state (NOT in initial implementation)
 - Long-term goal: repeated calls share context — the server keeps a
