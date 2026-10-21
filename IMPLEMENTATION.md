@@ -15,17 +15,25 @@ images. See `BRIEF.md` for requirements.
 ## Layout
 ```
 pyproject.toml
+README.md            # user-facing: tools, install, config, dev
+BRIEF.md             # requirements
+IMPLEMENTATION.md    # this file: design, OMP integration, release plan
+VISION_SESSION_COLLAPSE.md  # known issue: long-lived process degradation
 src/look_n_see/
   __init__.py
   __main__.py        # python -m look_n_see
   config.py          # env parsing + defaults
   images.py          # file path / data URI / URL -> (media_type, bytes) -> data URI
-  client.py          # InferenceClient wrapper: chat_completion, retry/backoff
+  client.py          # provider clients: retry/backoff, fallback chain
+  openrouter.py      # OpenRouter chat-completions transport (httpx)
   prompts.py         # default prompts per tool
-  server.py          # FastMCP app + tool registrations + main()
+  server.py          # MCPServer app + tool registrations + main()
 tests/
   test_images.py
   test_prompts.py
+  test_openrouter.py
+  test_config.py     # env parsing, provider routing, fallback parsing
+  test_client.py     # retries, fallback chain, transports (mocked)
   test_server.py     # registration smoke + mocked client
 ```
 
@@ -106,6 +114,52 @@ any working directory.
   and subagents.
 - To make it project-scoped instead of user-scoped, move the same block to
   `.omp/mcp.json` in this repo.
+
+## Release & packaging plan (parity with scrape-n-search)
+
+**Status: planned — nothing published or configured yet.** Target: mirror
+scrape-n-search's setup — `ci.yml` + `release.yml` GitHub Actions, distribution
+via PyPI with trusted publishing (OIDC, no tokens), and `uvx`/`pipx`
+installability, with release flow fully automated from a tag.
+
+Facts already checked:
+- GitHub repo `hughyyy/look-n-see` exists (created empty; default branch
+  `main` — local branch renamed from `master` to match).
+- `look-n-see` is available on PyPI (404 today); `look-n-see-mcp` also free as
+  an alternative if the plain name is taken by the time we publish.
+- Tests are stdlib `unittest` with zero dev deps — CI runs `unittest`, not
+  pytest.
+
+Planned steps, in order:
+
+1. **Add `LICENSE` (MIT)** — same as scrape-n-search. Pending user approval
+   (legal choice).
+2. **pyproject metadata**: add `readme = "README.md"`, `license = "MIT"`,
+   `[project.urls]` (repository → `https://github.com/hughyyy/look-n-see`),
+   keywords/classifiers. Name stays `look-n-see`; `requires-python >=3.10`.
+3. **`.github/workflows/ci.yml`**: tests on push to `main` + PRs, Python
+   matrix `["3.10", "3.14"]`, steps: checkout → setup-python → `pip install -e .`
+   → `python -m unittest discover -s tests -q`.
+4. **`.github/workflows/release.yml`**: on tag push `v*` — job 1 tests
+   (same as CI), job 2 builds sdist + wheel (`pip install build` → `python -m
+   build`), uploads `dist/` artifact; job 3 creates the GitHub Release with
+   auto-generated notes and attaches artifacts
+   (`gh release create "$GITHUB_REF_NAME" dist/* --generate-notes`);
+   job 4 publishes to PyPI via `pypa/gh-action-pypi-publish@release/v1`
+   (trusted publishing).
+5. **PyPI one-time admin step** (manual, outside the repo): register the
+   trusted publisher for project `look-n-see` → `hughyyy/look-n-see` (workflow
+   `release.yml`, environment `release` if used). Until then the publish job
+   fails with a clear OIDC error, as in scrape-n-search.
+6. **First release**: `git tag v0.1.0 && git push origin v0.1.0`; verify on a
+   clean machine with `uvx look-n-see` (registers as `look-n-see` console
+   script), then point MCP client config at `uvx look-n-see`.
+7. **Optional parity (deferred)**: one-line `install.sh` + `setup.sh`
+   installer like scrape-n-search's (source tarball → user venv → harness
+   registration), and a PyPI classifiers pass.
+
+Non-goals for packaging: no Docker image, no npm/JS packaging, no HTTP
+transport — stdio only, per BRIEF.
 
 ## Verification
 - Offline (this session): `compileall`, server starts and registers 3 tools,

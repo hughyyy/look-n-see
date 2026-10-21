@@ -93,9 +93,12 @@ the main model can act on.
   `pyproject.toml` with a console-script entry point; all config via env vars.
 
 ### Verification
-- Offline smoke tests: server starts, tools register, input parsing works,
-  mocked HF client. Live HF calls gated behind an env flag; user runs the
-  live test themselves.
+- Offline unit tests (stdlib `unittest`): server starts, tools register, input
+  parsing works, mocked clients. Live check is manual:
+  `scripts/live_smoke.py` with the provider token in the environment.
+- Known issue (2026-10-21): a long-lived server process can degrade over
+  ~tens of calls (canned refusals / non-analyses) — see
+  `VISION_SESSION_COLLAPSE.md`; a fresh process answers correctly.
 
 ## Stack
 - Python 3.14 (only available toolchain on this workstation)
