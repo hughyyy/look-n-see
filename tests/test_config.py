@@ -95,7 +95,7 @@ class LoadConfigTests(unittest.TestCase):
     def test_bad_int_falls_back_to_default(self):
         with mock.patch.dict(os.environ, {"VISION_MAX_TOKENS": "banana"}, clear=False):
             cfg = load_config()
-        self.assertEqual(cfg.max_tokens, 1024)
+        self.assertEqual(cfg.max_tokens, 2048)
 
 
 if __name__ == "__main__":

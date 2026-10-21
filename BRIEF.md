@@ -1,21 +1,40 @@
 # hf-vision-mcp — Project Brief
 
 ## Purpose
-An MCP (Model Context Protocol) server that exposes a vision-capable model via
-HuggingFace Inference. It gives models without native vision the ability to
-"see": the main model asks this server to analyze screenshots and explain
-images, and the results come back as tool results the main model can act on.
+An MCP (Model Context Protocol) server that exposes vision-capable models
+via OpenRouter and HuggingFace Inference. It gives models without native
+vision the ability to "see": the main model asks this server to analyze
+screenshots and explain images, and the results come back as tool results
+the main model can act on.
 
 ## Refined requirements (from concept Q&A)
 
 ### Access
-- HuggingFace **serverless Inference API** via `huggingface_hub` `InferenceClient`,
-  authenticated with `HF_TOKEN`.
-- Optional `HF_ENDPOINT` override for a dedicated Inference Endpoint later.
-- Simple retry with backoff on 429/5xx; clear errors otherwise.
+- **OpenRouter** (default): OpenAI-compatible chat completions via httpx,
+  authenticated with `OPENROUTER_API_KEY` (from env; OMP credential store).
+- **HuggingFace serverless Inference API** via `huggingface_hub`
+  `InferenceClient`, authenticated with `HF_TOKEN`; used for `hf:`/bare ids.
+- Optional `HF_ENDPOINT` override for a dedicated HF Inference Endpoint
+  (pins the HF transport only).
+- Model ids are provider-routed: `openrouter:<slug>` → OpenRouter,
+  `hf:<id>`/bare → HF; `VISION_PROVIDER=openrouter` flips bare ids.
+- Simple retry with backoff on 429/5xx; fallback chain `VISION_FALLBACKS`
+  on hard failure; clear errors otherwise.
 
 ### Transport
 - **stdio** only (local MCP client spawns the server as a subprocess).
+
+### Model
+- Configurable via env (`VISION_MODEL`), default
+  `openrouter:google/gemma-4-26b-a4b-it` (Gemma 4 26B A4B MoE via OpenRouter)
+  — chosen by benchmark sweep (2026-10-22): identical quality to the HF
+  serverless route at ~2x lower median latency / ~3x lower p90, ~$0.0002/call.
+  HF serverless `google/gemma-4-26B-A4B-it` is the configured fallback.
+- Every tool accepts an optional `model` id to override per call.
+- Notes from the sweep: Qwen/Qwen3-VL-30B-A3B-Instruct (HF) had the best raw
+  accuracy (correct calendar weekday derivation) but slower latency;
+  reasoning-heavy models (gpt-5-nano, nemotron) starve at 1024 max_tokens —
+  default budget raised to 2048.
 
 ### Image input
 - Accept all three, auto-detected:
@@ -28,21 +47,20 @@ images, and the results come back as tool results the main model can act on.
 - `analyze_screenshot` — UI/state analysis of a screenshot.
 - `ask_about_image` — Q&A over an image.
 - Every tool accepts an optional `prompt`/`focus` parameter so the main model
-  can steer toward targeted answers (features, values, specific regions).
+  can steer toward targeted answers (features, values, specific regions), and
+  an optional `model` parameter for per-call provider/model selection.
 - Output is **prompt-driven, loosely structured** (JSON where sensible, not a
   rigid schema). No separate OCR tool — prompt-driven Q&A covers text extraction.
 
-### Model
-- Configurable via env (`VISION_MODEL`), default `google/gemma-4-26B-A4B-it`
-  (Gemma 4 26B A4B MoE, instruct). Apache-2.0, served on HF serverless
-  inference today (verified against `router.huggingface.co/v1/models`).
-- Note: `google/gemma-4-12B-it` (the originally chosen 12B Unified) is
-  `any-to-any` and NOT on the serverless router — it needs a dedicated
-  Inference Endpoint (`HF_ENDPOINT`). 26B A4B is the same Gemma 4 family,
-  256K context, MoE (3.8B active → fast), MMMU-Pro 73.8%.
-- Other serverless vision options via `VISION_MODEL`:
-  `google/gemma-4-31B-it`, `Qwen/Qwen3-VL-30B-A3B-Instruct`,
-  `Qwen/Qwen2.5-VL-72B-Instruct`.
+### Benchmarking (implemented)
+- `scripts/benchmark.py`: models × images × reps (default 5) with resumable
+  JSONL recording (provider, latency, usage, finish_reason, flags), per-model
+  summary with output-shape classification, and a generated agent prompt for
+  a strengths/weaknesses assessment.
+- Run data lives in `benchmarks/` (gitignored). Sweep verdict 2026-10-22:
+  keep gemma-4-26B family (A4B) as default via OpenRouter; 4-31B as runner-up
+  (fastest, +25% cost, no quality gain); Qwen3-VL-30B most accurate but
+  slower; gpt-5-nano / nemotron unusable at 1024 max_tokens.
 
 ### Future: session state (NOT in initial implementation)
 - Long-term goal: repeated calls share context — the server keeps a

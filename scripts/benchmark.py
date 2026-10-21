@@ -65,7 +65,21 @@ def main() -> int:
         return 2
 
     if args.images:
-        images = [p.strip() for p in args.images.replace(",", " ").split() if p.strip()]
+        images = []
+        for entry in args.images.replace(",", " ").split():
+            entry = entry.strip()
+            if not entry:
+                continue
+            path = Path(entry)
+            if not path.is_absolute():
+                candidate = Path(args.images_dir) / entry
+                if candidate.exists():
+                    path = candidate
+            images.append(str(path))
+        missing = [p for p in images if not Path(p).exists()]
+        if missing:
+            print(f"error: image(s) not found: {', '.join(missing)}", file=sys.stderr)
+            return 2
     else:
         images = sorted(
             str(p) for p in Path(args.images_dir).iterdir() if p.suffix.lower() == ".png"
@@ -88,9 +102,11 @@ def main() -> int:
     summary = summarize(run_dir)
     print(f"benchmark complete: {run_dir}")
     for model_id, stats in summary["models"].items():
+        lat = stats.get("latency_s") or {}
+        median = lat.get("median", "n/a")
         print(
             f"  {model_id}: {stats['ok']}/{stats['calls']} ok, "
-            f"median {stats['latency_s']['median']}s, flags={stats['flag_counts']}"
+            f"median {median}s, flags={stats['flag_counts']}"
         )
     return 0
 

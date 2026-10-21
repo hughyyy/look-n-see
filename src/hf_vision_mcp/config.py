@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-DEFAULT_MODEL = "google/gemma-4-26B-A4B-it"
+DEFAULT_MODEL = "openrouter:google/gemma-4-26b-a4b-it"
 DEFAULT_OPENROUTER_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_PREFIX = "openrouter:"
 HF_PREFIX = "hf:"
@@ -82,7 +82,7 @@ def load_config() -> Config:
     return Config(
         model=os.environ.get("VISION_MODEL", DEFAULT_MODEL),
         endpoint=os.environ.get("HF_ENDPOINT") or None,
-        max_tokens=_env_int("VISION_MAX_TOKENS", 1024),
+        max_tokens=_env_int("VISION_MAX_TOKENS", 2048),
         timeout=_env_float("VISION_TIMEOUT", 60.0),
         retries=_env_int("VISION_RETRIES", 3),
         retry_backoff=_env_float("VISION_RETRY_BACKOFF", 2.0),

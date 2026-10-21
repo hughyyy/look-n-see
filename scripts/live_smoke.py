@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Live smoke test: one real inference call against HuggingFace.
+"""Live smoke test: one real inference call.
 
-Requires HF_TOKEN in the environment. Run with the venv python:
+Requires the provider token in the environment: OPENROUTER_API_KEY for
+openrouter: model ids (the default), HF_TOKEN for HF/hf: ids. Run with the
+venv python:
 
-    HF_TOKEN=hf__... .venv/bin/python scripts/live_smoke.py [image] [question]
+    OPENROUTER_API_KEY=sk-or-... .venv/bin/python scripts/live_smoke.py [image] [question]
 
 `image` defaults to a small sample image; `question` defaults to a generic
 description request. Prints the model's response to stdout.
@@ -24,8 +26,11 @@ SAMPLE_URI = (
 
 
 def main() -> int:
-    if not os.environ.get("HF_TOKEN"):
-        print("error: HF_TOKEN is not set", file=sys.stderr)
+    cfg = load_config()
+    needs_openrouter = cfg.provider_for(cfg.model) == "openrouter"
+    token_var = "OPENROUTER_API_KEY" if needs_openrouter else "HF_TOKEN"
+    if not os.environ.get(token_var):
+        print(f"error: {token_var} is not set for model {cfg.model}", file=sys.stderr)
         return 2
 
     image = sys.argv[1] if len(sys.argv) > 1 else SAMPLE_URI

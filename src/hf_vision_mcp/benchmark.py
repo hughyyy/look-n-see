@@ -139,17 +139,7 @@ def run_benchmark(
             try:
                 uri = to_data_uri(image_path)
             except ImageInputError as exc:
-                row = {
-                    "model": model_id,
-                    "image": image_name,
-                    "rep": 0,
-                    "prompt": spec.prompt,
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "ok": False,
-                    "error": f"image read failed: {exc}",
-                    "flags": ["image_error"],
-                }
-                _write_row(results_file, row)
+                print(f"  warning: skipping unreadable image {image_path!r}: {exc}", file=sys.stderr)
                 continue
             messages = build_messages(uri, spec.prompt, spec.prompt)
             for rep in range(1, spec.reps + 1):
