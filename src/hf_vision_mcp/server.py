@@ -19,34 +19,49 @@ def create_server(
     mcp = MCPServer(name="hf-vision-mcp")
 
     @mcp.tool()
-    def describe_image(image: str, prompt: str | None = None) -> str:
+    def describe_image(
+        image: str, prompt: str | None = None, model: str | None = None
+    ) -> str:
         """Describe an image in natural language.
 
         Args:
             image: File path, base64 data URI, or http(s) URL of the image.
             prompt: Optional instruction steering the description.
+            model: Optional model id; `openrouter:<slug>` routes to OpenRouter,
+                bare ids follow VISION_PROVIDER. Falls back through
+                VISION_FALLBACKS on failure.
         """
-        return _run(client, image, prompt, DESCRIBE_DEFAULT)
+        return _run(client, image, prompt, DESCRIBE_DEFAULT, model)
 
     @mcp.tool()
-    def analyze_screenshot(image: str, prompt: str | None = None) -> str:
+    def analyze_screenshot(
+        image: str, prompt: str | None = None, model: str | None = None
+    ) -> str:
         """Analyze a screenshot as a UI/state capture for an agent.
 
         Args:
             image: File path, base64 data URI, or http(s) URL of the screenshot.
             prompt: Optional instruction steering the analysis.
+            model: Optional model id; `openrouter:<slug>` routes to OpenRouter,
+                bare ids follow VISION_PROVIDER. Falls back through
+                VISION_FALLBACKS on failure.
         """
-        return _run(client, image, prompt, SCREENSHOT_DEFAULT)
+        return _run(client, image, prompt, SCREENSHOT_DEFAULT, model)
 
     @mcp.tool()
-    def ask_about_image(image: str, question: str) -> str:
+    def ask_about_image(
+        image: str, question: str, model: str | None = None
+    ) -> str:
         """Ask a question about an image and get an answer.
 
         Args:
             image: File path, base64 data URI, or http(s) URL of the image.
             question: The question to answer about the image.
+            model: Optional model id; `openrouter:<slug>` routes to OpenRouter,
+                bare ids follow VISION_PROVIDER. Falls back through
+                VISION_FALLBACKS on failure.
         """
-        return _run(client, image, question, ASK_DEFAULT)
+        return _run(client, image, question, ASK_DEFAULT, model)
 
     return mcp
 
@@ -56,6 +71,7 @@ def _run(
     image: str,
     prompt: str | None,
     default: str,
+    model: str | None = None,
 ) -> str:
     try:
         uri = to_data_uri(image)
@@ -63,7 +79,7 @@ def _run(
         return f"error: {exc}"
     messages = build_messages(uri, prompt, default)
     try:
-        return client.complete(messages)
+        return client.complete(messages, model=model)
     except Exception as exc:  # noqa: BLE001 - surfaced as a tool result
         return f"error: {exc}"
 

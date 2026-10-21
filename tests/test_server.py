@@ -26,9 +26,11 @@ class FakeClient:
         self.result = result
         self.error = error
         self.calls: list[list[dict]] = []
+        self.kwargs: list[dict] = []
 
-    def complete(self, messages):
+    def complete(self, messages, **kwargs):
         self.calls.append(messages)
+        self.kwargs.append(kwargs)
         if self.error is not None:
             raise self.error
         return self.result
@@ -73,6 +75,20 @@ class ToolBehaviorTests(unittest.TestCase):
         self.assertEqual(result, "42")
         (messages,) = fake.calls
         self.assertEqual(messages[0]["content"][1]["text"], "What value?")
+
+    def test_model_param_passed_to_client(self):
+        fake = FakeClient(result="ok")
+        mcp = create_server(cfg=CFG, client=fake)
+        call(
+            mcp,
+            "analyze_screenshot",
+            {
+                "image": PNG_DATA_URI,
+                "prompt": "What state?",
+                "model": "openrouter:google/gemma-4-26b-a4b-it:free",
+            },
+        )
+        self.assertEqual(fake.kwargs[0]["model"], "openrouter:google/gemma-4-26b-a4b-it:free")
 
     def test_invalid_image_returns_error_text(self):
         fake = FakeClient()
