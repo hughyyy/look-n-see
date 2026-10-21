@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "look-n-see"
 version = "0.1.0"
-description = "MCP server exposing a vision model via HuggingFace Inference"
+description = "MCP server exposing vision models (describe/analyze/ask about images) via OpenRouter and HuggingFace Inference"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=1.2",
+    "mcp>=2",
     "huggingface_hub>=0.24",
     "httpx>=0.27",
 ]

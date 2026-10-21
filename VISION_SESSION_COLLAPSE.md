@@ -1,7 +1,7 @@
 # Issue: vision MCP server collapsed mid-session (canned refusals / non-analyses)
 
 Date: 2026-10-21/22
-Reporter: agent session running the per-component visual audit of `vuedemond`
+Reporter: agent session running the per-component visual audit of a Vue demo app
 Severity: medium (diagnostic tool degraded; workaround = restart process)
 
 ## Summary
@@ -19,7 +19,7 @@ long-lived server process is the suspect**.
 ## Server identity (facts)
 
 - Launcher (from `~/.omp/agent/mcp.json`):
-  `type: stdio`, `command: /mnt/shared/Source/look-n-see/.venv/bin/look-n-see`,
+  `type: stdio`, `command: <checkout>/.venv/bin/look-n-see`,
   `env: HF_TOKEN = omp token huggingface`, `timeout: 120000`
 - Stack (per `IMPLEMENTATION.md`): Python 3.14, `mcp` 2.x, `huggingface_hub`
   `InferenceClient` (serverless inference), stdlib image parsing.
@@ -49,14 +49,14 @@ long-lived server process is the suspect**.
 2. **Endpoint healthy:** `scripts/live_smoke.py` (default sample) → correct
    description of the sample.
 3. **Environment checks passed:** `HF_TOKEN` resolves via
-   `/home/bernie/.local/bin/omp token huggingface`; server launched with no
+   `~/.local/bin/omp token huggingface`; server launched with no
    `VISION_MODEL`/`HF_ENDPOINT` overrides (defaults apply).
 4. **Deterministic counterpart:** the DOM/geometry layer (Playwright
    `getBoundingClientRect`, `elementFromPoint`, computed styles) adjudicated
    every vision claim; all fixed defects were independently confirmed by it,
    including the image above (mask present, `blocked: true`, "Wait…" text).
 5. Images referenced are archived in
-   `/mnt/shared/Source/vuedemond/docs/assets/visual-audit-2026-10-21.tar.gz`
+   `<app checkout>/docs/assets/visual-audit-2026-10-21.tar.gz`
    (extracted `vdaudit/`), live copies in `/tmp/vdaudit/` (volatile).
 
 ## Hypotheses (unverified)

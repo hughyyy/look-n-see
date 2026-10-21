@@ -33,7 +33,7 @@ def _models(default: str) -> tuple[str, ...]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--models", help="comma/space separated model ids (default: VISION_MODEL)")
-    ap.add_argument("--images-dir", default="/tmp/vdaudit", help="directory of PNG screenshots")
+    ap.add_argument("--images-dir", default=None, help="directory of PNG screenshots (default: current directory when --images is not given)")
     ap.add_argument("--images", help="comma-separated explicit image paths (overrides --images-dir/--limit)")
     ap.add_argument("--limit", type=int, default=0, help="use only the first N sorted images (0 = all)")
     ap.add_argument("--reps", type=int, default=5)
@@ -72,7 +72,7 @@ def main() -> int:
                 continue
             path = Path(entry)
             if not path.is_absolute():
-                candidate = Path(args.images_dir) / entry
+                candidate = Path(args.images_dir or ".") / entry
                 if candidate.exists():
                     path = candidate
             images.append(str(path))
@@ -82,7 +82,7 @@ def main() -> int:
             return 2
     else:
         images = sorted(
-            str(p) for p in Path(args.images_dir).iterdir() if p.suffix.lower() == ".png"
+            str(p) for p in Path(args.images_dir or ".").iterdir() if p.suffix.lower() == ".png"
         )
         if args.limit:
             images = images[: args.limit]

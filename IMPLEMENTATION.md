@@ -98,7 +98,7 @@ any working directory.
 - Config: `~/.omp/agent/mcp.json` →
   `look-n-see` (stdio, `.venv/bin/look-n-see`,
   `HF_TOKEN` resolved from OMP's own HuggingFace credential store via
-  `!/home/bernie/.local/bin/omp token huggingface`,
+  `!/home/<user>/.local/bin/omp token huggingface`,
   `OPENROUTER_API_KEY` via `!.../omp token openrouter`,
   `VISION_FALLBACKS=Qwen/Qwen3-VL-30B-A3B-Instruct openrouter:google/gemma-4-31b-it`,
   `timeout: 120000`).

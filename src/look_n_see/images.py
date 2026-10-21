@@ -6,16 +6,48 @@ import base64
 import mimetypes
 import os
 import re
+import urllib.error
 import urllib.request
 from urllib.parse import urlparse
 
 DEFAULT_MEDIA_TYPE = "image/png"
+# Hard cap on decoded image bytes; vision providers reject larger payloads anyway.
+MAX_IMAGE_BYTES = 25 * 1024 * 1024
 
 _DATA_URI_RE = re.compile(r"^data:(?P<media>[^;,]*)(?P<params>[^,]*),(?P<data>.*)$", re.DOTALL)
+_USERINFO_RE = re.compile(r"(://)[^/@\s]+@")
 
 
 class ImageInputError(ValueError):
     """Raised when an image input cannot be resolved."""
+
+
+class _HttpOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Redirect handler that only follows http(s) targets.
+
+    The stdlib allows redirects to ftp://; that scheme escape is outside the
+    documented http(s) input contract, so refuse it here.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802 - stdlib API
+        if urlparse(newurl).scheme.lower() not in ("http", "https"):
+            raise urllib.error.HTTPError(
+                newurl, code, f"redirect to disallowed scheme: {urlparse(newurl).scheme}", headers, fp
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(_HttpOnlyRedirectHandler())
+
+
+def _open_url(url: str, timeout: float):
+    """Open one http(s) URL with the scheme-restricting redirect handler."""
+    return _OPENER.open(url, timeout=timeout)
+
+
+def _redact_url(url: str) -> str:
+    """Mask embedded credentials (https://user:pass@...) in an echoed URL."""
+    return _USERINFO_RE.sub(r"\1***@", url)
 
 
 def _is_http_url(value: str) -> bool:
@@ -51,6 +83,10 @@ def _from_data_uri(uri: str) -> tuple[str, bytes]:
         raise ImageInputError("malformed data: URI")
     media_type = match.group("media") or DEFAULT_MEDIA_TYPE
     payload = match.group("data")
+    # Base64 expands to ~4/3 of the decoded size; reject oversize payloads
+    # before allocating.
+    if len(payload) > (MAX_IMAGE_BYTES * 4 // 3) + 4:
+        raise ImageInputError(f"data: URI payload exceeds {MAX_IMAGE_BYTES} byte limit")
     try:
         data = base64.b64decode(payload, validate=True)
     except Exception:
@@ -58,22 +94,32 @@ def _from_data_uri(uri: str) -> tuple[str, bytes]:
             data = base64.urlsafe_b64decode(payload)
         except Exception as exc:
             raise ImageInputError("data: URI payload is not valid base64") from exc
+    if len(data) > MAX_IMAGE_BYTES:
+        raise ImageInputError(f"data: URI payload exceeds {MAX_IMAGE_BYTES} byte limit")
     return media_type, data
 
 
 def _from_path(path: str) -> tuple[str, bytes]:
     media_type = mimetypes.guess_type(path)[0] or DEFAULT_MEDIA_TYPE
+    if os.path.getsize(path) > MAX_IMAGE_BYTES:
+        raise ImageInputError(f"image file exceeds {MAX_IMAGE_BYTES} byte limit: {path}")
     with open(path, "rb") as fh:
         return media_type, fh.read()
 
 
 def _from_url(url: str, timeout: float = 30.0) -> tuple[str, bytes]:
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            data = resp.read()
+        with _open_url(url, timeout) as resp:
+            data = resp.read(MAX_IMAGE_BYTES + 1)
             media_type = resp.headers.get_content_type()
     except Exception as exc:
-        raise ImageInputError(f"failed to fetch image URL {url!r}: {exc}") from exc
+        # HTTPError carries a response body file (a tempfile when the server
+        # sent none); close it so it is not leaked until GC.
+        if isinstance(exc, urllib.error.HTTPError) and getattr(exc, "fp", None) is not None:
+            exc.fp.close()
+        raise ImageInputError(f"failed to fetch image URL {_redact_url(url)!r}: {exc}") from exc
+    if len(data) > MAX_IMAGE_BYTES:
+        raise ImageInputError(f"image URL exceeds {MAX_IMAGE_BYTES} byte limit: {_redact_url(url)!r}")
     if not media_type or media_type == "application/octet-stream":
         media_type = mimetypes.guess_type(urlparse(url).path)[0] or DEFAULT_MEDIA_TYPE
     return media_type, data

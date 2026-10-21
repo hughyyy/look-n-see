@@ -75,8 +75,28 @@ def _slug(model_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", ".", model_id)
 
 
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def _open_nofollow(path: Path, mode: str, *, exclusive: bool = False):
+    """Open a file refusing to follow symlinks (best effort).
+
+    Guards the benchmark's append/overwrite writes against a pre-planted
+    symlink in the output directory. `exclusive` (run.json) creates only if
+    absent, matching the resume semantics atomically.
+    """
+    flags = os.O_WRONLY | _O_NOFOLLOW
+    if "a" in mode:
+        flags |= os.O_APPEND | os.O_CREAT
+    else:
+        flags |= os.O_CREAT | os.O_TRUNC
+    if exclusive:
+        flags |= os.O_EXCL
+    return os.fdopen(os.open(path, flags, 0o644), mode, encoding="utf-8")
+
+
 def _write_row(path: Path, row: dict) -> None:
-    with open(path, "a", encoding="utf-8") as fh:
+    with _open_nofollow(path, "a") as fh:
         fh.write(json.dumps(row) + "\n")
 
 
@@ -115,8 +135,11 @@ def run_benchmark(
         },
     }
     run_file = out_dir / "run.json"
-    if not run_file.exists():
-        run_file.write_text(json.dumps(run_meta, indent=2) + "\n")
+    try:
+        with _open_nofollow(run_file, "w", exclusive=True) as fh:
+            fh.write(json.dumps(run_meta, indent=2) + "\n")
+    except FileExistsError:
+        pass  # resuming an existing run keeps its original metadata
 
     results_file = out_dir / "results.jsonl"
     done: set[tuple[str, str, int]] = set()
@@ -264,15 +287,13 @@ def summarize(out_dir: str | Path, *, write_files: bool = True) -> dict:
         by_model_dir = out_dir / "by-model"
         by_model_dir.mkdir(exist_ok=True)
         for model_id, model_rows in by_model.items():
-            with open(by_model_dir / f"{_slug(model_id)}.jsonl", "w", encoding="utf-8") as fh:
+            with _open_nofollow(by_model_dir / f"{_slug(model_id)}.jsonl", "w") as fh:
                 for r in model_rows:
                     fh.write(json.dumps(r) + "\n")
-        (out_dir / "summary.json").write_text(
-            json.dumps(summary, indent=2) + "\n", encoding="utf-8"
-        )
-        (out_dir / "analysis_prompt.md").write_text(
-            _analysis_prompt(out_dir, list(by_model)), encoding="utf-8"
-        )
+        with _open_nofollow(out_dir / "summary.json", "w") as fh:
+            fh.write(json.dumps(summary, indent=2) + "\n")
+        with _open_nofollow(out_dir / "analysis_prompt.md", "w") as fh:
+            fh.write(_analysis_prompt(out_dir, list(by_model)))
     return summary
 
 
@@ -328,11 +349,11 @@ analyses. Data is in the run directory:
   terse / empty), flagged samples, and repetition rate across reps.
 - `__OUT__/by-model/<slug>.jsonl` — full response text for every
   (model, image, rep). Models in this run: __MODELS__.
-- Images are UI screenshots of PrimeVue-style components ("vuedemond") whose
-  filenames indicate the component (e.g. `data-00-datatable-paginator.png`).
+- Images are UI screenshots of PrimeVue-style components whose filenames
+  indicate the component (e.g. `data-00-datatable-paginator.png`).
 
-Images may be inspected directly at /tmp/vdaudit/ (or the image paths in
-run.json) if you have image-reading tools.
+Images may be inspected directly at their paths in run.json if you have
+image-reading tools.
 
 ## Ground rules
 

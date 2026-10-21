@@ -81,12 +81,14 @@ class OpenRouterTransport:
             )
         data = response.json()
         choices = data.get("choices")
-        if not choices:
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise OpenRouterError(
                 f"malformed OpenRouter response: no 'choices' (body: {str(data)[:200]})"
             )
         choice = choices[0]
-        message = choice.get("message") or {}
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            message = {}
         return RawResult(
             text=_content_to_text(message.get("content")),
             finish_reason=choice.get("finish_reason"),
