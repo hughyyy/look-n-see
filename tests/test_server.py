@@ -3,8 +3,8 @@
 import asyncio
 import unittest
 
-from hf_vision_mcp.config import Config
-from hf_vision_mcp.server import create_server
+from look_n_see.config import Config
+from look_n_see.server import create_server
 
 PNG_1PX = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="

@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hf-vision-mcp"
+name = "look-n-see"
 version = "0.1.0"
 description = "MCP server exposing a vision model via HuggingFace Inference"
 requires-python = ">=3.10"
@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-hf-vision-mcp = "hf_vision_mcp.server:main"
+look-n-see = "look_n_see.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

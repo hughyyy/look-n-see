@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest import mock
 
-from hf_vision_mcp.config import DEFAULT_FALLBACKS, Config, load_config
+from look_n_see.config import DEFAULT_FALLBACKS, Config, load_config
 
 
 def make_config(**kw) -> Config:

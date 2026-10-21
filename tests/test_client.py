@@ -6,10 +6,10 @@ from unittest import mock
 
 import httpx
 
-from hf_vision_mcp import client as client_mod
-from hf_vision_mcp.client import Completion, InferenceError, VisionClient, _describe_error, _is_retryable
-from hf_vision_mcp.config import Config
-from hf_vision_mcp.openrouter import RawResult
+from look_n_see import client as client_mod
+from look_n_see.client import Completion, InferenceError, VisionClient, _describe_error, _is_retryable
+from look_n_see.config import Config
+from look_n_see.openrouter import RawResult
 
 
 def make_config(**kw) -> Config:
@@ -159,7 +159,7 @@ class RetryTests(unittest.TestCase):
             "usage": {"completion_tokens": 2},
         }
         with mock.patch(
-            "hf_vision_mcp.openrouter.httpx.Client.post",
+            "look_n_see.openrouter.httpx.Client.post",
             return_value=httpx.Response(
                 200,
                 json=payload,
@@ -178,14 +178,14 @@ class RetryTests(unittest.TestCase):
         # bare default would leak lowercase slugs. With no endpoint the
         # constructor carries no model — per-call ids drive routing.
         cfg = make_config(model="openrouter:google/gemma-4-26b-a4b-it")
-        with mock.patch("hf_vision_mcp.client.InferenceClient") as ic:
+        with mock.patch("look_n_see.client.InferenceClient") as ic:
             VisionClient(cfg)
         args = ic.call_args.args
         model_arg = ic.call_args.kwargs.get("model") or (args[0] if args else None)
         self.assertIsNone(model_arg)
 
         cfg = make_config(endpoint="https://endpoint.example")
-        with mock.patch("hf_vision_mcp.client.InferenceClient") as ic:
+        with mock.patch("look_n_see.client.InferenceClient") as ic:
             VisionClient(cfg)
         args = ic.call_args.args
         model_arg = ic.call_args.kwargs.get("model") or (args[0] if args else None)

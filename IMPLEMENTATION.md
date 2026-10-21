@@ -1,4 +1,4 @@
-# hf-vision-mcp — Implementation Plan
+# look-n-see — Implementation Plan
 
 ## Goal
 A stdio MCP server exposing a vision model via HuggingFace serverless
@@ -9,15 +9,15 @@ images. See `BRIEF.md` for requirements.
 - Python 3.14 (only toolchain on this workstation)
 - `mcp` (MCPServer, mcp 2.x) + `huggingface_hub` (InferenceClient)
 - stdlib for image input parsing (urllib, base64, mimetypes) — no extra deps
-- `pyproject.toml` (setuptools) with console-script entry point `hf-vision-mcp`
+- `pyproject.toml` (setuptools) with console-script entry point `look-n-see`
 - Tests: stdlib `unittest` (zero dev deps)
 
 ## Layout
 ```
 pyproject.toml
-src/hf_vision_mcp/
+src/look_n_see/
   __init__.py
-  __main__.py        # python -m hf_vision_mcp
+  __main__.py        # python -m look_n_see
   config.py          # env parsing + defaults
   images.py          # file path / data URI / URL -> (media_type, bytes) -> data URI
   client.py          # InferenceClient wrapper: chat_completion, retry/backoff
@@ -54,7 +54,7 @@ tests/
 `model` accepts any id in the same syntax as `VISION_MODEL`; omitted = default.
 On failure the call walks the fallback chain (`VISION_FALLBACKS`).
 
-## Benchmark suite (`scripts/benchmark.py` + `hf_vision_mcp.benchmark`)
+## Benchmark suite (`scripts/benchmark.py` + `look_n_see.benchmark`)
 - Run: models × images × reps, streaming JSONL, resumable; per-call metadata
   (provider, transport, latency, finish_reason, usage, retries).
 - Summarize: per-model stats, output-shape flags (refusals, JSON-marker dumps,
@@ -88,7 +88,7 @@ The server is registered as a user-level MCP server so agents can call it from
 any working directory.
 
 - Config: `~/.omp/agent/mcp.json` →
-  `hf-vision` (stdio, `.venv/bin/hf-vision-mcp`,
+  `look-n-see` (stdio, `.venv/bin/look-n-see`,
   `HF_TOKEN` resolved from OMP's own HuggingFace credential store via
   `!/home/bernie/.local/bin/omp token huggingface`,
   `OPENROUTER_API_KEY` via `!.../omp token openrouter`,
@@ -100,7 +100,7 @@ any working directory.
   tracks the credential OMP itself uses.
 - Why `timeout: 120000`: OMP's default MCP request timeout is 30s, too short for
   serverless inference on a vision model; 120s gives headroom.
-- After editing, run `/mcp reload`, then `/mcp test hf-vision` and `/mcp list`
+- After editing, run `/mcp reload`, then `/mcp test look-n-see` and `/mcp list`
   in an OMP session. The three tools (`describe_image`, `analyze_screenshot`,
   `ask_about_image`) then appear alongside built-in tools for the main agent
   and subagents.

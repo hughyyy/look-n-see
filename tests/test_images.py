@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from hf_vision_mcp.images import ImageInputError, load_image, to_data_uri
+from look_n_see.images import ImageInputError, load_image, to_data_uri
 
 PNG_1PX = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="

@@ -1,4 +1,4 @@
-"""Run the MCP server via `python -m hf_vision_mcp`."""
+"""Run the MCP server via `python -m look_n_see`."""
 
 from .server import main
 

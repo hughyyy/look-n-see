@@ -1,4 +1,4 @@
-# AGENTS.md — hf-vision-mcp
+# AGENTS.md — look-n-see
 
 ## Project
 MCP server exposing a vision model via HuggingFace Inference. See `BRIEF.md`.

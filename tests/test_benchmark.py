@@ -5,9 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hf_vision_mcp.benchmark import BenchmarkSpec, classify, run_benchmark, summarize
-from hf_vision_mcp.client import Completion, InferenceError
-from hf_vision_mcp.config import Config
+from look_n_see.benchmark import BenchmarkSpec, classify, run_benchmark, summarize
+from look_n_see.client import Completion, InferenceError
+from look_n_see.config import Config
 
 
 class FakeBenchClient:

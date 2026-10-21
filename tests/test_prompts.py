@@ -2,7 +2,7 @@
 
 import unittest
 
-from hf_vision_mcp.prompts import (
+from look_n_see.prompts import (
     ASK_DEFAULT,
     DESCRIBE_DEFAULT,
     SCREENSHOT_DEFAULT,

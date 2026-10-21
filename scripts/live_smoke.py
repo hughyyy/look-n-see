@@ -14,10 +14,10 @@ description request. Prints the model's response to stdout.
 import os
 import sys
 
-from hf_vision_mcp.client import VisionClient
-from hf_vision_mcp.config import load_config
-from hf_vision_mcp.images import to_data_uri
-from hf_vision_mcp.prompts import ASK_DEFAULT, build_messages
+from look_n_see.client import VisionClient
+from look_n_see.config import load_config
+from look_n_see.images import to_data_uri
+from look_n_see.prompts import ASK_DEFAULT, build_messages
 
 SAMPLE_URI = (
     "data:image/png;base64,"

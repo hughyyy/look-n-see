@@ -1,4 +1,4 @@
-# hf-vision-mcp — Project Brief
+# look-n-see — Project Brief
 
 ## Purpose
 An MCP (Model Context Protocol) server that exposes vision-capable models

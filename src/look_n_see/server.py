@@ -16,7 +16,7 @@ def create_server(
 ) -> MCPServer:
     cfg = cfg or config_mod.load_config()
     client = client or VisionClient(cfg)
-    mcp = MCPServer(name="hf-vision-mcp")
+    mcp = MCPServer(name="look-n-see")
 
     @mcp.tool()
     def describe_image(

@@ -21,9 +21,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from hf_vision_mcp.benchmark import BenchmarkSpec, run_benchmark, summarize
-from hf_vision_mcp.client import VisionClient
-from hf_vision_mcp.config import load_config
+from look_n_see.benchmark import BenchmarkSpec, run_benchmark, summarize
+from look_n_see.client import VisionClient
+from look_n_see.config import load_config
 
 
 def _models(default: str) -> tuple[str, ...]:
@@ -49,7 +49,7 @@ def main() -> int:
         return 0
 
     cfg = load_config()
-    from hf_vision_mcp.prompts import SCREENSHOT_DEFAULT
+    from look_n_see.prompts import SCREENSHOT_DEFAULT
 
     prompt = SCREENSHOT_DEFAULT if args.prompt == "default" else args.prompt
     models = _models(args.models or cfg.model)

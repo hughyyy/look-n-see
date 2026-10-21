@@ -5,8 +5,8 @@ from unittest import mock
 
 import httpx
 
-from hf_vision_mcp.config import Config
-from hf_vision_mcp.openrouter import OpenRouterTransport
+from look_n_see.config import Config
+from look_n_see.openrouter import OpenRouterTransport
 
 
 def make_config(**kw) -> Config:
