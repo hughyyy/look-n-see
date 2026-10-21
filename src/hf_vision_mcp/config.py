@@ -9,6 +9,12 @@ DEFAULT_MODEL = "openrouter:google/gemma-4-26b-a4b-it"
 DEFAULT_OPENROUTER_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_PREFIX = "openrouter:"
 HF_PREFIX = "hf:"
+# Default chain when VISION_FALLBACKS is unset: precision second opinion,
+# then a larger/faster last resort. Set VISION_FALLBACKS="" to disable.
+DEFAULT_FALLBACKS = (
+    "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    "openrouter:google/gemma-4-31b-it",
+)
 
 
 @dataclass(frozen=True)
@@ -69,8 +75,8 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _parse_fallbacks(raw: str | None) -> tuple[str, ...]:
-    if not raw:
-        return ()
+    if raw is None:
+        return DEFAULT_FALLBACKS
     parts = [p.strip() for p in raw.replace(",", " ").split() if p.strip()]
     return tuple(parts)
 

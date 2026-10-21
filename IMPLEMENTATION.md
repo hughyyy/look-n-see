@@ -36,7 +36,7 @@ tests/
 | `OPENROUTER_API_KEY` | — | OpenRouter auth (needed for `openrouter:` models — the default route) |
 | `VISION_MODEL` | `openrouter:google/gemma-4-26b-a4b-it` | default model id; `openrouter:` prefix routes to OpenRouter, `hf:`/bare ids to HF |
 | `VISION_PROVIDER` | `auto` | `auto` (prefix decides), `hf`, or `openrouter` (bare ids) |
-| `VISION_FALLBACKS` | — | comma/space-separated model chain tried after `VISION_MODEL` on failure |
+| `VISION_FALLBACKS` | `Qwen/Qwen3-VL-30B-A3B-Instruct openrouter:google/gemma-4-31b-it` | comma/space-separated model chain tried after `VISION_MODEL` on failure; unset = default chain, `""` = disabled |
 | `HF_ENDPOINT` | — | dedicated HF endpoint URL; pins the HF transport target |
 | `VISION_MAX_TOKENS` | `2048` | max generated tokens (raised from 1024: reasoning models starve at 1024) |
 | `VISION_TIMEOUT` | `60` | per-request timeout (s) |
@@ -64,9 +64,10 @@ On failure the call walks the fallback chain (`VISION_FALLBACKS`).
 - Benchmark rows disable fallbacks so attribution is exact.
 - Sweep results live under `benchmarks/` (gitignored); verdict: default =
   `openrouter:google/gemma-4-26b-a4b-it` (same model as the old HF default,
-  ~2x median / ~3x p90 latency improvement, ~$0.0002/call), HF serverless
-  gemma kept as `VISION_FALLBACKS`. Notable: Qwen3-VL-30B-A3B-Instruct had the
-  best raw accuracy; gpt-5-nano/nemotron need >1024 max_tokens (reasoning).
+  ~2x median / ~3x p90 latency improvement, ~$0.0002/call), with the default
+  fallback chain Qwen3-VL-30B-A3B-Instruct (precision/second opinion) then
+  openrouter gemma-4-31b (last resort). Notable: gpt-5-nano/nemotron need
+  >1024 max_tokens (reasoning), so the budget default is 2048.
 
 ## Design seams (for deferred session state)
 - `client.complete(messages)` takes OpenAI-style chat messages (text + image
@@ -91,7 +92,8 @@ any working directory.
   `HF_TOKEN` resolved from OMP's own HuggingFace credential store via
   `!/home/bernie/.local/bin/omp token huggingface`,
   `OPENROUTER_API_KEY` via `!.../omp token openrouter`,
-  `VISION_FALLBACKS=google/gemma-4-26B-A4B-it`, `timeout: 120000`).
+  `VISION_FALLBACKS=Qwen/Qwen3-VL-30B-A3B-Instruct openrouter:google/gemma-4-31b-it`,
+  `timeout: 120000`).
 - The `!` env indirection runs `omp token huggingface` (OMP's supported way to
   read the stored `huggingface` api_key in `~/.omp/agent/agent.db`) and injects
   the trimmed output as `HF_TOKEN` — no token duplication, no re-export, and it

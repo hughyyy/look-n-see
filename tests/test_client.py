@@ -172,6 +172,25 @@ class RetryTests(unittest.TestCase):
         self.assertEqual(result.transport, "OpenRouterTransport")
         self.assertEqual(post.call_args.kwargs["json"]["model"], "q/q")
 
+    def test_hf_transport_constructor_model(self):
+        # huggingface_hub maps the InferenceClient constructor model to the HF
+        # router; an openrouter:-prefixed default must never reach it, and a
+        # bare default would leak lowercase slugs. With no endpoint the
+        # constructor carries no model — per-call ids drive routing.
+        cfg = make_config(model="openrouter:google/gemma-4-26b-a4b-it")
+        with mock.patch("hf_vision_mcp.client.InferenceClient") as ic:
+            VisionClient(cfg)
+        args = ic.call_args.args
+        model_arg = ic.call_args.kwargs.get("model") or (args[0] if args else None)
+        self.assertIsNone(model_arg)
+
+        cfg = make_config(endpoint="https://endpoint.example")
+        with mock.patch("hf_vision_mcp.client.InferenceClient") as ic:
+            VisionClient(cfg)
+        args = ic.call_args.args
+        model_arg = ic.call_args.kwargs.get("model") or (args[0] if args else None)
+        self.assertEqual(model_arg, "https://endpoint.example")
+
     def test_metadata_fields(self):
         cfg = make_config(retries=0)
         client = VisionClient(cfg)

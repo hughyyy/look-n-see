@@ -29,7 +29,11 @@ the main model can act on.
   `openrouter:google/gemma-4-26b-a4b-it` (Gemma 4 26B A4B MoE via OpenRouter)
   — chosen by benchmark sweep (2026-10-22): identical quality to the HF
   serverless route at ~2x lower median latency / ~3x lower p90, ~$0.0002/call.
-  HF serverless `google/gemma-4-26B-A4B-it` is the configured fallback.
+- Fallback chain (default, `VISION_FALLBACKS`; set "" to disable):
+  1. `Qwen/Qwen3-VL-30B-A3B-Instruct` (HF) — precision/second opinion
+  2. `openrouter:google/gemma-4-31b-it` — fast last resort
+  An explicit `model=` tool argument is how a caller requests a second
+  opinion without waiting for a failure.
 - Every tool accepts an optional `model` id to override per call.
 - Notes from the sweep: Qwen/Qwen3-VL-30B-A3B-Instruct (HF) had the best raw
   accuracy (correct calendar weekday derivation) but slower latency;

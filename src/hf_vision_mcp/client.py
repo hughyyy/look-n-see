@@ -70,8 +70,12 @@ class _HFTransport:
 
     def __init__(self, config: Config, client: InferenceClient | None = None):
         self.config = config
+        # The constructor must not pin an HF model id: huggingface_hub maps
+        # it to the HF router, and provider-prefixed or lowercase slugs are
+        # rejected there. Per-call model ids are always passed explicitly, so
+        # only a dedicated Endpoint URL belongs in the constructor.
         self._client = client or InferenceClient(
-            model=config.target,
+            model=config.endpoint,
             token=os.environ.get("HF_TOKEN"),
             timeout=config.timeout,
         )

@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest import mock
 
-from hf_vision_mcp.config import Config, load_config
+from hf_vision_mcp.config import DEFAULT_FALLBACKS, Config, load_config
 
 
 def make_config(**kw) -> Config:
@@ -96,6 +96,21 @@ class LoadConfigTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"VISION_MAX_TOKENS": "banana"}, clear=False):
             cfg = load_config()
         self.assertEqual(cfg.max_tokens, 2048)
+
+    def test_default_chain_when_env_unset(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VISION_FALLBACKS", None)
+            cfg = load_config()
+        self.assertEqual(
+            cfg.fallbacks,
+            ("Qwen/Qwen3-VL-30B-A3B-Instruct", "openrouter:google/gemma-4-31b-it"),
+        )
+        self.assertEqual(cfg.fallbacks, DEFAULT_FALLBACKS)
+
+    def test_empty_string_disables_chain(self):
+        with mock.patch.dict(os.environ, {"VISION_FALLBACKS": " "}, clear=False):
+            cfg = load_config()
+        self.assertEqual(cfg.fallbacks, ())
 
 
 if __name__ == "__main__":
