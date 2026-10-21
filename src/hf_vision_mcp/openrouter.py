@@ -25,6 +25,11 @@ class RawResult:
         self.usage = usage
 
 
+class OpenRouterError(RuntimeError):
+    """Raised for malformed OpenRouter responses (HTTP-level errors raise
+    `httpx.HTTPStatusError` so the shared retry policy can evaluate them)."""
+
+
 def _content_to_text(content: Any) -> str:
     """OpenRouter may return content as str or as a list of content parts."""
     if isinstance(content, str):
@@ -75,7 +80,12 @@ class OpenRouterTransport:
                 response=response,
             )
         data = response.json()
-        choice = data["choices"][0]
+        choices = data.get("choices")
+        if not choices:
+            raise OpenRouterError(
+                f"malformed OpenRouter response: no 'choices' (body: {str(data)[:200]})"
+            )
+        choice = choices[0]
         message = choice.get("message") or {}
         return RawResult(
             text=_content_to_text(message.get("content")),
