@@ -150,3 +150,8 @@ Ship OCR in the existing httpx-only architecture, on the current single-package 
 - Local: /mnt/shared/Source/look-n-see/README.md, /mnt/shared/Source/look-n-see/pyproject.toml, /mnt/shared/Source/scrape-n-search/README.md, /mnt/shared/Source/scrape-n-search/mcp-server/pyproject.toml — grounding (ENABLED_TOOLS/DEFAULT_PROVIDER hides tools; PyPI `scrape-n-search-mcp`; vision benchmark figures)
 
 **[UNVERIFIED] items:** Mistral batch-exact-50% price (third-party sites claim $2/1k batch); Google Vision/Document-AI auth mechanics (service-account OAuth2) and Azure `Ocp-Apim-Subscription-Key` header name — cite Microsoft's REST quickstart; anything about model *quality* beyond the vendor-reported benchmarks above.
+
+## Addendum (2026-10-22, implementation)
+
+- `rapidocr-onnxruntime` **1.4.x requires Python `<3.13`** (PyPI metadata, verified during implementation); the `ocr` extra therefore uses environment markers: `>=1.4` on Python <3.13, `>=1.2` on >=3.13 (1.2.3 is the newest unconstrained release). RapidOCR's own project supports 3.14 only via the 1.2 line as of this date.
+- HF `hf_inference`-mapped VLMs via `Qwen/Qwen2.5-VL-72B-Instruct` were **not** added to the fallback chain; OCR routes through the vlm engine, which reuses `VISION_FALLBACKS` unchanged.

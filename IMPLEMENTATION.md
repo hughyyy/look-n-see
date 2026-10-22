@@ -22,19 +22,23 @@ VISION_SESSION_COLLAPSE.md  # known issue: long-lived process degradation
 src/look_n_see/
   __init__.py
   __main__.py        # python -m look_n_see
-  config.py          # env parsing + defaults
+  config.py          # env parsing + defaults (incl. OCR roles/engine)
   images.py          # file path / data URI / URL -> (media_type, bytes) -> data URI
   client.py          # provider clients: retry/backoff, fallback chain
   openrouter.py      # OpenRouter chat-completions transport (httpx)
+  ocr.py             # OCR dispatcher + vlm/rapidocr/mistral engines
   prompts.py         # default prompts per tool
-  server.py          # MCPServer app + tool registrations + main()
+  server.py          # MCPServer app + role-gated tool registration + main()
 tests/
   test_images.py
   test_prompts.py
   test_openrouter.py
-  test_config.py     # env parsing, provider routing, fallback parsing
+  test_config.py     # env parsing, provider routing, fallback parsing, OCR roles
   test_client.py     # retries, fallback chain, transports (mocked)
-  test_server.py     # registration smoke + mocked client
+  test_ocr.py        # mistral adapter (mocked httpx), dispatcher, engine errors
+  test_server.py     # registration smoke (incl. role gating) + mocked client
+research/
+  ocr-options.md     # OCR engine + distribution-pattern research (2026-10)
 ```
 
 ## Config (env vars)
@@ -50,6 +54,10 @@ tests/
 | `VISION_TIMEOUT` | `60` | per-request timeout (s) |
 | `VISION_RETRIES` | `3` | retries on 429/5xx/connection |
 | `VISION_RETRY_BACKOFF` | `2.0` | exponential backoff base (s) |
+| `VISION_ENABLED` | `1` | `0` → don't register the vision tools (OCR-only variant) |
+| `OCR_ENABLED` | `1` | `0` → don't register the OCR tool (vision-only variant) |
+| `OCR_ENGINE` | `vlm` | default OCR engine: `vlm` \| `rapidocr` \| `mistral` |
+| `MISTRAL_API_KEY` | — | auth for the `mistral` OCR engine |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter endpoint |
 | `OPENROUTER_SITE_URL` / `OPENROUTER_APP_NAME` | — | optional `HTTP-Referer` / `X-Title` headers |
 
@@ -57,10 +65,35 @@ tests/
 1. `describe_image(image, prompt=None, model=None)` — general description.
 2. `analyze_screenshot(image, prompt=None, model=None)` — UI/state analysis.
 3. `ask_about_image(image, question, model=None)` — Q&A over the image.
+4. `extract_text(image, prompt=None, model=None, engine=None)` — OCR; returns
+   `{"text", "engine", ...}` JSON. `engine` overrides `OCR_ENGINE`.
 
 `image` accepts: file path, base64 data URI, or `http(s)://` URL (auto-detect).
 `model` accepts any id in the same syntax as `VISION_MODEL`; omitted = default.
 On failure the call walks the fallback chain (`VISION_FALLBACKS`).
+
+## OCR design (implemented 2026-10)
+
+- `ocr.py` exposes `OcrDispatcher.extract(uri, prompt, model, engine)` — the
+  OCR counterpart of `client.complete`; engines are cached per process.
+- `vlm` engine: `build_messages(uri, prompt, OCR_DEFAULT)` through the same
+  `VisionClient` (so fallbacks, retries, and provider routing are shared).
+- `rapidocr` engine: lazy import of `rapidocr-onnxruntime` + cv2/numpy — an
+  `OcrError` with an install hint when the `ocr` extra is missing. Handles
+  both the 1.2.x `(result, elapse)` tuple and the 1.4.x plain-list shapes.
+- `mistral` engine: `httpx.Client` → `POST /v1/ocr` with Bearer auth,
+  retry/backoff reuse (`_is_retryable` from client), per-page markdown joined.
+  `MISTRAL_API_KEY` required; an `OcrError` otherwise.
+- Packaging: `[project.optional-dependencies] ocr` pulls rapidocr with env
+  markers (`>=1.4` on Python <3.13; `>=1.2` on >=3.13 — 1.4.x declares
+  `requires_python <3.13`, verified against PyPI 2026-10-22).
+- Variants: `VISION_ENABLED`/`OCR_ENABLED` gate registration at startup, so
+  `tools/list` advertises exactly the enabled surface (MCP spec-sanctioned;
+  same pattern as scrape-n-search's `ENABLED_TOOLS`). Dedicated
+  `look-n-see-vision`/`look-n-see-ocr` console scripts are **not implemented**
+  (TBD — only if a role must be unselectable at startup; they'd just set the
+  env flag in a wrapper).
+- Engine choice research + cloud/local alternatives: `research/ocr-options.md`.
 
 ## Benchmark suite (`scripts/benchmark.py` + `look_n_see.benchmark`)
 - Run: models × images × reps, streaming JSONL, resumable; per-call metadata
@@ -137,6 +170,8 @@ Planned steps, in order:
 2. **pyproject metadata**: add `readme = "README.md"`, `license = "MIT"`,
    `[project.urls]` (repository → `https://github.com/hughyyy/look-n-see`),
    keywords/classifiers. Name stays `look-n-see`; `requires-python >=3.10`.
+   The `ocr` extra already exists (env-markered rapidocr) and ships with the
+   single release — no variant-specific distributions.
 3. **`.github/workflows/ci.yml`**: tests on push to `main` + PRs, Python
    matrix `["3.10", "3.14"]`, steps: checkout → setup-python → `pip install -e .`
    → `python -m unittest discover -s tests -q`.

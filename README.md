@@ -1,33 +1,61 @@
 # look-n-see
 
 A lightweight [MCP](https://modelcontextprotocol.io) server that gives agents without
-native vision the ability to **see**: three tools — **describe_image,
-analyze_screenshot, ask_about_image** — run a vision-capable model on an image and
-return text the calling model can act on.
+native vision the ability to **see** — and to **read**: three vision tools
+(**describe_image, analyze_screenshot, ask_about_image**) run a vision-capable
+model on an image and return text the calling model can act on, and an OCR tool
+(**extract_text**) pulls text out of images via three engines (VLM, local
+RapidOCR, or Mistral OCR).
 
 Images are accepted three ways, auto-detected: a file path on disk, a base64
-`data:` URI, or an `http(s)://` URL. The default route is
+`data:` URI, or an `http(s)://` URL. The default vision route is
 `openrouter:google/gemma-4-26b-a4b-it` via OpenRouter (chosen by a benchmark sweep
 for identical quality at ~2x lower median latency and ~$0.0002/call vs the HF
 serverless route), with an automatic fallback chain to
 `Qwen/Qwen3-VL-30B-A3B-Instruct` then `openrouter:google/gemma-4-31b-it`.
 
+## Release variants
+
+One package, one release — the tool surface is selected at startup by two env
+flags (`tools/list` advertises exactly what is registered):
+
+| Variant | Install | Env |
+| --- | --- | --- |
+| **Both (default)** | `pip install 'look-n-see[ocr]'` (or `uvx --from 'look-n-see[ocr]' look-n-see`) | *(defaults)* |
+| Vision only | `pip install look-n-see` | `OCR_ENABLED=0` |
+| OCR only | `pip install 'look-n-see[ocr]'` | `VISION_ENABLED=0` |
+
+The `ocr` extra pulls the local RapidOCR engine (ONNX, no torch). Dedicated
+`look-n-see-vision` / `look-n-see-ocr` console scripts remain a possible future
+addition (see `IMPLEMENTATION.md`).
+
 ## Tools
 
-Every tool returns free-form text (JSON where the model deems it sensible) and
-accepts an optional `prompt` to steer the answer. All config is environment-driven
-(see below).
+Every tool returns structured output the calling model can act on (JSON where it
+matters) and accepts an optional `prompt` to steer the answer. All config is
+environment-driven (see below).
 
 | Tool | Description |
 | --- | --- |
 | `describe_image` | `image` (required), `prompt`?, `model`? — general natural-language description. |
 | `analyze_screenshot` | `image` (required), `prompt`?, `model`? — UI/state analysis of a screenshot for an agent. |
 | `ask_about_image` | `image`, `question` (required), `model`? — Q&A over the image. |
+| `extract_text` | `image` (required), `prompt`?, `model`?, `engine`? — OCR. Returns `{"text", "engine", ...}`. |
 
 Model ids are provider-routed: `openrouter:<slug>` → OpenRouter,
 `hf:<id>`/bare → HuggingFace Inference (`VISION_PROVIDER=openrouter` flips bare
 ids). On failure the call walks the fallback chain; retries with backoff cover
 429/5xx/connection errors.
+
+### OCR engines
+
+| Engine | How | Requires |
+| --- | --- | --- |
+| `vlm` (default) | image + OCR prompt through the existing vision client; zero extra deps | the default model's provider key |
+| `rapidocr` | local ONNX (PP-OCR models), offline, boxes + confidence | `pip install 'look-n-see[ocr]'` |
+| `mistral` | dedicated cloud OCR (`api.mistral.ai/v1/ocr`), per-page markdown + bboxes | `MISTRAL_API_KEY` (≈$4/1k pages) |
+
+Select per call with `engine=` or globally with `OCR_ENGINE`.
 
 ## Requirements
 
@@ -84,6 +112,10 @@ the `!` lines and export `HF_TOKEN`/`OPENROUTER_API_KEY` before launching.
 | `VISION_TIMEOUT` | `60` | per-request timeout (s) |
 | `VISION_RETRIES` | `3` | retries on 429/5xx/connection errors |
 | `VISION_RETRY_BACKOFF` | `2.0` | exponential backoff base (s) |
+| `VISION_ENABLED` | `1` | set `0` to disable the vision tools (OCR-only variant) |
+| `OCR_ENABLED` | `1` | set `0` to disable the OCR tool (vision-only variant) |
+| `OCR_ENGINE` | `vlm` | default OCR engine: `vlm` \| `rapidocr` \| `mistral` |
+| `MISTRAL_API_KEY` | — | auth for the `mistral` OCR engine |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter endpoint |
 | `OPENROUTER_SITE_URL` / `OPENROUTER_APP_NAME` | — | optional `HTTP-Referer` / `X-Title` headers |
 
@@ -93,14 +125,19 @@ The server normalizes every image input to a data URI, builds one chat message
 (image + prompt) per tool call, and hands it to `VisionClient` — a pure function of
 the message list, which is the seam for future session-state work. The client
 routes per model id (`openrouter:` vs `hf:`/bare), retries with exponential
-backoff, and walks the fallback chain on hard failure. Stateless by design: no
-session history is kept between calls.
+backoff, and walks the fallback chain on hard failure. The OCR tool routes through
+an `OcrDispatcher` with the same image normalization: the `vlm` engine reuses the
+vision client, `rapidocr` decodes locally via ONNX, and `mistral` posts the data
+URI to Mistral's OCR API. Stateless by design: no session history is kept between
+calls, and `VISION_ENABLED`/`OCR_ENABLED` decide at startup which tools
+`tools/list` advertises.
 
 ## Development
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -q   # 56 offline tests: parsing, routing,
-                                                    # retries, prompts, server behavior (mocked client)
+.venv/bin/pip install -e '.[ocr]'                    # incl. local OCR engine
+.venv/bin/python -m unittest discover -s tests -q   # offline tests: parsing, routing,
+                                                    # retries, prompts, engines, server behavior
 HF_TOKEN=... OPENROUTER_API_KEY=... .venv/bin/python scripts/live_smoke.py [image] [question]
 ```
 

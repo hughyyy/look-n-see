@@ -18,6 +18,12 @@ SCREENSHOT_DEFAULT = (
 
 ASK_DEFAULT = "Answer the question about this image."
 
+OCR_DEFAULT = (
+    "Extract all visible text from this image exactly as written. Preserve "
+    "line breaks and reading order. Output ONLY the extracted text — no "
+    "commentary, no markdown fences, no prefix."
+)
+
 
 def build_messages(image_data_uri: str, prompt: str | None, default: str) -> list[dict[str, Any]]:
     """Build a single-turn chat message embedding the image plus the prompt.

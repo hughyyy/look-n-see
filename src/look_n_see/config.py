@@ -31,6 +31,12 @@ class Config:
     openrouter_base_url: str = DEFAULT_OPENROUTER_URL
     openrouter_site_url: str | None = None
     openrouter_app_name: str | None = None
+    # Tool-surface roles: the three release variants are expressed as
+    # (VISION_ENABLED, OCR_ENABLED) — both on = default, one off = focused.
+    vision_enabled: bool = True
+    ocr_enabled: bool = True
+    ocr_engine: str = "vlm"  # vlm | rapidocr | mistral
+    mistral_api_key: str | None = None
 
     @property
     def target(self) -> str:
@@ -74,11 +80,23 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
 def _parse_fallbacks(raw: str | None) -> tuple[str, ...]:
     if raw is None:
         return DEFAULT_FALLBACKS
     parts = [p.strip() for p in raw.replace(",", " ").split() if p.strip()]
     return tuple(parts)
+
+
+def _parse_engine(raw: str | None) -> str:
+    engine = (raw or "vlm").strip().lower()
+    return engine if engine in {"vlm", "rapidocr", "mistral"} else "vlm"
 
 
 def load_config() -> Config:
@@ -98,4 +116,8 @@ def load_config() -> Config:
         openrouter_base_url=os.environ.get("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_URL),
         openrouter_site_url=os.environ.get("OPENROUTER_SITE_URL") or None,
         openrouter_app_name=os.environ.get("OPENROUTER_APP_NAME") or None,
+        vision_enabled=_env_bool("VISION_ENABLED", True),
+        ocr_enabled=_env_bool("OCR_ENABLED", True),
+        ocr_engine=_parse_engine(os.environ.get("OCR_ENGINE")),
+        mistral_api_key=os.environ.get("MISTRAL_API_KEY") or None,
     )

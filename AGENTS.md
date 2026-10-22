@@ -7,8 +7,14 @@ See `README.md` (user-facing), `BRIEF.md` (requirements), `IMPLEMENTATION.md`
 
 ## Conventions
 - Python 3.10+. No Node/Cargo toolchains on this workstation.
-- Server dependency-light: MCP SDK + `huggingface_hub` + `httpx` only. Tests use
-  stdlib `unittest` — zero dev deps.
+- Server dependency-light: MCP SDK + `huggingface_hub` + `httpx` only; the
+  local OCR engine (`rapidocr-onnxruntime`) is an optional `ocr` extra.
+  Tests use stdlib `unittest` — zero dev deps.
+- OCR routing: `OcrDispatcher` in `src/look_n_see/ocr.py` with three engines
+  (vlm default, rapidocr local, mistral cloud). Don't add a new OCR engine
+  without updating the dispatcher + `research/ocr-options.md` tradeoffs.
+- Tool-surface variants: `VISION_ENABLED`/`OCR_ENABLED` gate registration at
+  startup — the three release variants come from env, not separate packages.
 - Every MCP tool must return structured output the calling model can act on
   (JSON where it matters, not prose-only).
 - Secrets (HF token, OpenRouter key) come from environment, never hardcoded or
@@ -28,12 +34,14 @@ See `README.md` (user-facing), `BRIEF.md` (requirements), `IMPLEMENTATION.md`
 ## Verification
 - `python -m compileall` / import smoke test after changes.
 - `python -m unittest discover -s tests -q` — full offline suite (image input
-  parsing, config, prompts, OpenRouter transport, retries/fallbacks, server
-  registration + mocked-client tool behavior).
+  parsing, config incl. OCR roles, prompts, transports, retries/fallbacks,
+  OCR engines (mocked httpx), server registration + role gating).
 - MCP server must start and register tools without a live HF call
-  (tool registration must not require network).
+  (tool registration must not require network); OCR engines other than `vlm`
+  must degrade to clear errors when their extra/key is missing.
 - Live calls are manual: `scripts/live_smoke.py` with the provider token in the
-  environment (or via `omp token <provider>`).
+  environment (or via `omp token <provider>`); live OCR via the `extract_text`
+  tool (`OCR_ENGINE=rapidocr` local, or default vlm).
 - Known issue: long-lived server processes can degrade over many calls
   (canned refusals / non-analyses) — see `VISION_SESSION_COLLAPSE.md`; a fresh
   process recovers immediately.

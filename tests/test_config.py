@@ -112,6 +112,40 @@ class LoadConfigTests(unittest.TestCase):
             cfg = load_config()
         self.assertEqual(cfg.fallbacks, ())
 
+    def test_role_flags_default_on(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            cfg = load_config()
+        self.assertTrue(cfg.vision_enabled)
+        self.assertTrue(cfg.ocr_enabled)
+        self.assertEqual(cfg.ocr_engine, "vlm")
+        self.assertIsNone(cfg.mistral_api_key)
+
+    def test_role_flags_parse_off_forms(self):
+        for raw in ("0", "false", "off", "no", ""):
+            with self.subTest(raw=raw):
+                with mock.patch.dict(
+                    os.environ,
+                    {"VISION_ENABLED": raw, "OCR_ENABLED": "false", "OCR_ENGINE": "rapidocr"},
+                    clear=False,
+                ):
+                    cfg = load_config()
+                self.assertFalse(cfg.vision_enabled)
+                self.assertFalse(cfg.ocr_enabled)
+                self.assertEqual(cfg.ocr_engine, "rapidocr")
+
+    def test_ocr_engine_validated(self):
+        with mock.patch.dict(os.environ, {"OCR_ENGINE": "Mistral"}, clear=False):
+            cfg = load_config()
+        self.assertEqual(cfg.ocr_engine, "mistral")
+        with mock.patch.dict(os.environ, {"OCR_ENGINE": "wat"}, clear=False):
+            cfg = load_config()
+        self.assertEqual(cfg.ocr_engine, "vlm")
+
+    def test_mistral_key_loaded(self):
+        with mock.patch.dict(os.environ, {"MISTRAL_API_KEY": "key123"}, clear=False):
+            cfg = load_config()
+        self.assertEqual(cfg.mistral_api_key, "key123")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,10 +2,11 @@
 
 ## Purpose
 An MCP (Model Context Protocol) server that exposes vision-capable models
-via OpenRouter and HuggingFace Inference. It gives models without native
-vision the ability to "see": the main model asks this server to analyze
-screenshots and explain images, and the results come back as tool results
-the main model can act on.
+via OpenRouter and HuggingFace Inference, plus an OCR tool with three
+engines. It gives models without native vision the ability to "see" and
+"read": the main model asks this server to analyze screenshots, explain
+images, and extract text, and the results come back as tool results the
+main model can act on.
 
 ## Refined requirements (from concept Q&A)
 
@@ -50,11 +51,34 @@ the main model can act on.
 - `describe_image` — general natural-language description.
 - `analyze_screenshot` — UI/state analysis of a screenshot.
 - `ask_about_image` — Q&A over an image.
-- Every tool accepts an optional `prompt`/`focus` parameter so the main model
-  can steer toward targeted answers (features, values, specific regions), and
-  an optional `model` parameter for per-call provider/model selection.
+- `extract_text` — OCR: all visible text as `{"text", "engine", ...}` JSON.
+  - Every tool accepts an optional `prompt`/`focus` parameter so the main model
+    can steer toward targeted answers (features, values, specific regions), and
+    an optional `model` parameter for per-call provider/model selection.
+  - `extract_text` additionally accepts `engine` (per-call override of
+    `OCR_ENGINE`).
+
+### OCR engines (researched 2026-10 — see `research/ocr-options.md`)
+- `vlm` (default): image + OCR prompt through the existing vision client;
+  zero extra deps, no new secrets.
+- `rapidocr`: local ONNX engine (PP-OCR models) — offline, no torch;
+  requires the optional `ocr` extra (`rapidocr-onnxruntime`; note 1.4.x is
+  Python <3.13, older Pythons get the 1.2 line via env markers).
+- `mistral`: dedicated cloud OCR (httpx → `api.mistral.ai/v1/ocr`),
+  document-grade accuracy, per-page markdown + bounding boxes, ≈$4/1k pages;
+  requires `MISTRAL_API_KEY`.
 - Output is **prompt-driven, loosely structured** (JSON where sensible, not a
-  rigid schema). No separate OCR tool — prompt-driven Q&A covers text extraction.
+  rigid schema); `extract_text` returns a JSON envelope with the extracted
+  text plus engine-specific metadata.
+
+### Release variants (one package, role-gated registration)
+- Both (default): register vision + OCR tools (`VISION_ENABLED=1`,
+  `OCR_ENABLED=1`).
+- Vision only: `OCR_ENABLED=0`.
+- OCR only: `VISION_ENABLED=0`.
+- `tools/list` advertises exactly the enabled surface. Dedicated
+  `look-n-see-vision`/`look-n-see-ocr` console scripts are a possible later
+  addition (tracked in `IMPLEMENTATION.md`, not implemented).
 
 ### Benchmarking (implemented)
 - `scripts/benchmark.py`: models × images × reps (default 5) with resumable
@@ -106,8 +130,10 @@ the main model can act on.
 - pip + venv, `pyproject.toml`
 
 ## Non-goals (initial implementation)
-- No local model hosting / weights management.
+- No local model hosting / weights management (the local OCR engine is
+  prebuilt ONNX models via pip, not weight management).
 - No training or fine-tuning.
 - No image generation.
-- No HTTP/SSE transport, no OCR tool, no rigid output schemas.
+- No HTTP/SSE transport, no rigid output schemas, no PDF parsing (Mistral
+  accepts PDFs directly, but the tool surface stays image-first).
 - No session state / multi-turn context (specified above, deferred).

@@ -16,5 +16,13 @@ dependencies = [
 [project.scripts]
 look-n-see = "look_n_see.server:main"
 
+[project.optional-dependencies]
+# Local OCR engine (otherwise extract_text uses the vlm engine by default).
+# rapidocr-onnxruntime caps at <3.13; newer Pythons fall back to the 1.2 line.
+ocr = [
+    "rapidocr-onnxruntime>=1.4; python_version < '3.13'",
+    "rapidocr-onnxruntime>=1.2; python_version >= '3.13'",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]

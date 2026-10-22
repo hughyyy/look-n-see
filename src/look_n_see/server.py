@@ -1,4 +1,4 @@
-"""FastMCP server exposing the vision tools."""
+"""MCPServer exposing the vision and OCR tools."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from mcp.server.mcpserver import MCPServer
 from . import config as config_mod
 from .client import VisionClient
 from .images import ImageInputError, to_data_uri
+from .ocr import OcrDispatcher
 from .prompts import ASK_DEFAULT, DESCRIBE_DEFAULT, SCREENSHOT_DEFAULT, build_messages
 
 
@@ -16,8 +17,21 @@ def create_server(
 ) -> MCPServer:
     cfg = cfg or config_mod.load_config()
     client = client or VisionClient(cfg)
+    ocr = OcrDispatcher(cfg, vision_client=client)
     mcp = MCPServer(name="look-n-see")
 
+    # Role-gated registration: each release variant enables a subset of the
+    # surface here — both on = default, VISION_ENABLED=0 = OCR-only,
+    # OCR_ENABLED=0 = vision-only. tools/list advertises exactly what is
+    # registered, which is what MCP clients display.
+    if cfg.vision_enabled:
+        _register_vision_tools(mcp, client)
+    if cfg.ocr_enabled:
+        _register_ocr_tool(mcp, ocr)
+    return mcp
+
+
+def _register_vision_tools(mcp: MCPServer, client: VisionClient) -> None:
     @mcp.tool()
     def describe_image(
         image: str, prompt: str | None = None, model: str | None = None
@@ -63,7 +77,31 @@ def create_server(
         """
         return _run(client, image, question, ASK_DEFAULT, model)
 
-    return mcp
+
+def _register_ocr_tool(mcp: MCPServer, ocr: OcrDispatcher) -> None:
+    @mcp.tool()
+    def extract_text(
+        image: str,
+        prompt: str | None = None,
+        model: str | None = None,
+        engine: str | None = None,
+    ) -> str:
+        """Extract all visible text from an image (OCR).
+
+        Args:
+            image: File path, base64 data URI, or http(s) URL of the image.
+            prompt: Optional instruction steering extraction (vlm engine).
+            model: Optional model id for the vlm engine (same syntax as the
+                vision tools).
+            engine: Override the OCR engine for this call: `vlm` (default),
+                `rapidocr` (local, needs the `ocr` extra), or `mistral`
+                (needs MISTRAL_API_KEY).
+        """
+        try:
+            uri = to_data_uri(image)
+            return ocr.extract(uri, prompt=prompt, model=model, engine=engine)
+        except Exception as exc:  # noqa: BLE001 - surfaced as a tool result
+            return f"error: {exc}"
 
 
 def _run(

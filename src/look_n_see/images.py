@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import mimetypes
 import os
 import re
@@ -32,7 +33,11 @@ class _HttpOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802 - stdlib API
         if urlparse(newurl).scheme.lower() not in ("http", "https"):
             raise urllib.error.HTTPError(
-                newurl, code, f"redirect to disallowed scheme: {urlparse(newurl).scheme}", headers, fp
+                newurl,
+                code,
+                f"redirect to disallowed scheme: {urlparse(newurl).scheme}",
+                headers,
+                io.BytesIO(),  # explicit body: avoids CPython 3.14's fp=None tempfile
             )
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
