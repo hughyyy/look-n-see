@@ -3,7 +3,8 @@
 ## Project
 MCP server exposing a vision model via OpenRouter and HuggingFace Inference.
 See `README.md` (user-facing), `BRIEF.md` (requirements), `IMPLEMENTATION.md`
-(design + release plan).
+(design + release plan), `HANDOVER.md` (session handover, current state,
+known issues).
 
 ## Conventions
 - Python 3.10+. No Node/Cargo toolchains on this workstation.

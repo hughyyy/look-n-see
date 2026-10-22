@@ -18,7 +18,10 @@ pyproject.toml
 README.md            # user-facing: tools, install, config, dev
 BRIEF.md             # requirements
 IMPLEMENTATION.md    # this file: design, OMP integration, release plan
+HANDOVER.md          # session handover: state, known issues, next steps
 VISION_SESSION_COLLAPSE.md  # known issue: long-lived process degradation
+research/
+  ocr-options.md     # OCR engine + distribution-pattern research (2026-10)
 src/look_n_see/
   __init__.py
   __main__.py        # python -m look_n_see
@@ -142,9 +145,10 @@ any working directory.
 - Why `timeout: 120000`: OMP's default MCP request timeout is 30s, too short for
   serverless inference on a vision model; 120s gives headroom.
 - After editing, run `/mcp reload`, then `/mcp test look-n-see` and `/mcp list`
-  in an OMP session. The three tools (`describe_image`, `analyze_screenshot`,
-  `ask_about_image`) then appear alongside built-in tools for the main agent
-  and subagents.
+  in an OMP session. The four tools (`describe_image`, `analyze_screenshot`,
+  `ask_about_image`, `extract_text`) then appear alongside built-in tools for
+  the main agent and subagents; `VISION_ENABLED`/`OCR_ENABLED` in the server
+  env trim the set per variant.
 - To make it project-scoped instead of user-scoped, move the same block to
   `.omp/mcp.json` in this repo.
 
@@ -197,8 +201,13 @@ Non-goals for packaging: no Docker image, no npm/JS packaging, no HTTP
 transport — stdio only, per BRIEF.
 
 ## Verification
-- Offline (this session): `compileall`, server starts and registers 3 tools,
-  image parsing unit tests (file/data-uri/URL), prompts unit tests, mocked
-  client end-to-end tool test.
-- Live (user, later): `HF_TOKEN` set + `scripts/live_smoke.py` — one real
-  inference call. Not run by me; user does this.
+- Offline: `compileall`; `python -m unittest discover -s tests -q` (86 tests —
+  image parsing, config incl. OCR roles, prompts, transports, retries/fallback
+  chains, OCR engines with mocked httpx, server registration + role gating);
+  server starts and registers tools with no live provider call.
+- Live (manual): provider tokens in env (or `omp token <provider>`), then
+  `scripts/live_smoke.py` for vision and the `extract_text` tool for OCR
+  (rapidocr engine = local). Verified 2026-10-22: default vision route,
+  rapidocr + vlm engines, and role-gated registrations over stdio.
+- A restart of the OMP client re-spawns the server from the editable install,
+  so a running session picks up new tool registrations without config changes.

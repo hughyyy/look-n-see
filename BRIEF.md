@@ -126,7 +126,9 @@ main model can act on.
 
 ## Stack
 - Python 3.14 (only available toolchain on this workstation)
-- `mcp` (MCPServer, mcp 2.x), `huggingface_hub`
+- `mcp` (MCPServer, mcp 2.x), `huggingface_hub`, `httpx`
+- Optional `ocr` extra: `rapidocr-onnxruntime` (env-markered — see
+  `IMPLEMENTATION.md` "OCR design")
 - pip + venv, `pyproject.toml`
 
 ## Non-goals (initial implementation)
