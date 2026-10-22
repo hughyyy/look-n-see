@@ -59,6 +59,17 @@ and HuggingFace Inference plus optional local/cloud OCR engines.
   type validation; PII redaction of machine paths in docs.
 - **Docs** — README (variants table, OCR engines, config), BRIEF, IMPLEMENTATION
   (OCR design + release plan), AGENTS, this handover.
+- **Model/mode comparison runs** (2026-10-22) — `scripts/compare_modes.py`
+  (vision vs vlm-ocr vs rapidocr over a sampled set) and
+  `scripts/compare_models.py` (multi-model × vision/vlm-ocr, reference-free
+  consensus metrics, resumable JSONL). Two live runs over `/tmp/omp-sshots*`:
+  15-image three-mode sweep; 5 text-dense images × 5 models × 2 modes
+  (55/55 calls ok). Headline findings (detail in gitignored
+  `benchmarks/compare-models-*/summary.md`): gemma-4-31b-it == gemma-4-26b
+  OCR accuracy at 1.6–3× lower latency; qwen3-vl-30b fabricated ~15% of its
+  OCR tokens on one dense page (pixel-verified); gpt-4o-mini diverges by
+  reading different real text rather than fabricating; every VLM-OCR model
+  beat rapidocr on prose at equal latency.
 
 ## How to run
 
@@ -86,6 +97,9 @@ the OMP registration resolves the first two via `omp token <provider>`.
 - `src/look_n_see/images.py` — file/data-URI/URL → data URI (bounded, http(s)-only redirects)
 - `src/look_n_see/config.py` — env parsing + defaults (incl. OCR roles/engine)
 - `src/look_n_see/benchmark.py` + `scripts/benchmark.py` — benchmark harness
+- `scripts/compare_modes.py`, `scripts/compare_models.py` — vision/OCR
+  three-mode and multi-model comparison harnesses (resumable JSONL +
+  consensus/local-ref metrics)
 - `research/ocr-options.md` — OCR engine + distribution-pattern research
 - `README.md` (user-facing), `BRIEF.md` (requirements), `IMPLEMENTATION.md` (design + release plan)
 
@@ -125,10 +139,16 @@ the OMP registration resolves the first two via `omp token <provider>`.
 - **Vision-collapse follow-ups** (from `VISION_SESSION_COLLAPSE.md`): raw
   response logging, self-check/auto-restart after N non-conforming responses,
   a `health` tool.
-- **Extended live testing** (next session): after an OMP restart, drive all
-  four mounted tools through the registered server incl. rapidocr/vlm engines
-  and error paths; optionally add `MISTRAL_API_KEY` to mcp.json and test
-  `engine=mistral` live.
+- **Model-chain reorder (recommended, pending wider validation)** — the
+  multi-model comparison measured gemma-4-31b-it at accuracy equal to the
+  26b default with 1.6–3× lower latency (vision + vlm-ocr). Candidates after
+  a 15–20 image confirmation run: `VISION_MODEL=openrouter:google/gemma-4-31b-it`
+  with 26b as first fallback. qwen3-vl-30b not recommended for the chain
+  (fabrication); gpt-4o-mini not recommended for OCR (coverage).
+- **Extended live testing (partially done)** — comparison runs exercised all
+  three OCR engines live (vlm/rapidocr via scripts; mistral still untested
+  key-wise). Remaining: drive the mounted tools through the registered server
+  after an OMP restart, and optionally add `MISTRAL_API_KEY` to mcp.json.
 
 ## Note
 
