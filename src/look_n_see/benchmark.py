@@ -147,9 +147,10 @@ def run_benchmark(
         for line in results_file.read_text(encoding="utf-8").splitlines():
             try:
                 row = json.loads(line)
-            except json.JSONDecodeError:
+                done.add((row["model"], row["image"], row["rep"]))
+            except (json.JSONDecodeError, KeyError, TypeError):
+                # Truncated or hand-edited rows are skipped, never fatal.
                 continue
-            done.add((row["model"], row["image"], row["rep"]))
 
     if progress:
         print(f"run: {out_dir}  models={len(spec.models)} images={len(spec.images)} reps={spec.reps}",
@@ -221,7 +222,7 @@ def _call_row(
     except InferenceError as exc:
         row.update(ok=False, error=str(exc), retries=0)
     except Exception as exc:  # noqa: BLE001 - recorded, not fatal
-        row.update(ok=False, error=f"{exc.__class__.__name__}: {exc}")
+        row.update(ok=False, error=f"{exc.__class__.__name__}: {exc}", retries=0)
     row["flags"] = classify(row.get("text") or "") if row.get("ok") else [
         "error"
     ]

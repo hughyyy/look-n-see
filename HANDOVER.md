@@ -20,9 +20,10 @@ and HuggingFace Inference plus optional local/cloud OCR engines.
   the enabled surface): both (default), vision-only (`OCR_ENABLED=0`),
   OCR-only (`VISION_ENABLED=0`).
 
-## Current state (all verified 2026-10-22)
+## Current state (verified 2026-10-22; test suite re-verified 2026-10-23)
 
-- **86 tests pass** (`python -m unittest discover -s tests -q`, zero dev deps).
+- **294 tests pass** (`python -m unittest discover -s tests -q`, zero dev deps).
+  Offline only; live behavior unchanged from the 2026-10-22 checks.
 - Registered with Oh My Pi: `~/.omp/agent/mcp.json` → `look-n-see` (stdio,
   `/mnt/shared/Source/look-n-see/.venv/bin/look-n-see`, editable install of the
   repo, env: `HF_TOKEN`/`OPENROUTER_API_KEY` via `!omp token ...`,
@@ -44,6 +45,30 @@ and HuggingFace Inference plus optional local/cloud OCR engines.
 
 ## Since the previous handover (initial session → 2026-10-22)
 
+- **Edge-case hardening + coverage expansion (2026-10-23)** — 164 → 294 tests.
+  Image input: exact-cap boundary, empty payloads rejected for file/data
+  URI/URL, case-insensitive `data:`/`;BASE64` forms, unreadable files and
+  mid-stream read failures wrapped as `ImageInputError`, HTTPError body
+  tempfiles closed (no ResourceWarning), redirect loops and
+  `file:`/`ftp:`/`data:` redirect targets refused, credential redaction on
+  fetch and oversize errors. Config: empty model/site/app/base URL and
+  whitespace-only keys treated as unset, credentials stripped, negative
+  retries/backoff clamped, non-positive max tokens/timeout and NaN/inf fall
+  back; unmapped provider strings route bare ids to HF. Providers:
+  non-object JSON bodies and non-string content parts raise `OpenRouterError`;
+  missing `finish_reason`/`usage` handled; HF responses without choices and
+  non-dict usage handled; `_describe_error` tolerates non-dict error bodies;
+  `VISION_PROVIDER=openrouter` routing and HF-endpoint/OpenRouter-fallback
+  isolation tested. OCR: Mistral non-object bodies/non-list or non-dict pages
+  rejected, connection errors retried, exponential backoff tested; dispatcher
+  forwards prompt/model, propagates engine errors and does not cache failed
+  engines; the real local ONNX engine runs on a blank PNG when the `ocr` extra
+  is installed (skipped otherwise). Benchmark: resume tolerates partial rows;
+  symlinked output files refused; metadata/summary fields (latency, finish
+  reasons, retries, repetition) and the flagged-sample cap asserted.
+  Server: stdio handshake covers all four env combinations (including no
+  tools), lists *and invokes* a tool, and asserts MCP argument validation
+  (`ToolError` for missing/wrong-typed args) and the error-result contract.
 - **OCR** — `extract_text` tool + `OcrDispatcher` (`src/look_n_see/ocr.py`):
   `vlm` (reuses VisionClient; zero deps), `rapidocr` (local ONNX, `ocr` extra;
   handles both the 1.2.x `(result, elapse)` tuple and 1.4.x list shapes),

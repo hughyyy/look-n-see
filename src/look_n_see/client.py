@@ -39,9 +39,12 @@ def _is_retryable(exc: Exception) -> bool:
         code = getattr(status, "status_code", None)
         if code is not None:
             return code in RETRYABLE_STATUS
-    # Connection/timeout errors from the underlying HTTP layer.
+    # Connection/timeout errors from the underlying HTTP layer. httpx raises
+    # its own ConnectError (not a builtin ConnectionError), which is the
+    # classic transient failure — retry it.
     return isinstance(exc, (ConnectionError, TimeoutError)) or exc.__class__.__name__ in {
         "ConnectionError",
+        "ConnectError",
         "Timeout",
         "ReadTimeout",
         "ConnectTimeout",
@@ -55,6 +58,8 @@ def _describe_error(exc: Exception) -> str:
         try:
             body = response.json()
         except Exception:
+            body = {}
+        if not isinstance(body, dict):
             body = {}
         message = body.get("error")
         if isinstance(message, dict):
@@ -91,10 +96,19 @@ class _HFTransport:
             model=call_model,
             max_tokens=max_tokens,
         )
+        choices = getattr(response, "choices", None) or []
+        if not choices:
+            raise InferenceError("HF response contained no choices")
+        choice = choices[0]
+        usage = getattr(response, "usage", None)
+        if isinstance(usage, dict):
+            usage = usage or None
+        elif usage is not None:
+            usage = getattr(usage, "__dict__", None) or None
         return RawResult(
-            text=response.choices[0].message.content or "",
-            finish_reason=response.choices[0].finish_reason,
-            usage=response.usage.__dict__ if response.usage else None,
+            text=getattr(getattr(choice, "message", None), "content", None) or "",
+            finish_reason=getattr(choice, "finish_reason", None),
+            usage=usage,
         )
 
 
@@ -179,7 +193,7 @@ class VisionClient:
         bare_model = self.config.strip_prefix(model_id)
         last_error: Exception | None = None
         t0 = time.monotonic()
-        for attempt in range(self.config.retries + 1):
+        for attempt in range(max(0, self.config.retries) + 1):
             try:
                 result = transport.chat_completion(
                     messages, bare_model, max_tokens or self.config.max_tokens
@@ -198,6 +212,6 @@ class VisionClient:
                 last_error = exc
                 if not _is_retryable(exc) or attempt >= self.config.retries:
                     break
-                time.sleep(self.config.retry_backoff * (2**attempt))
+                time.sleep(max(0.0, self.config.retry_backoff) * (2**attempt))
         # Bare detail: the chain wrapper builds the final message.
         raise InferenceError(_describe_error(last_error))

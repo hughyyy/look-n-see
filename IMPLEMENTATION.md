@@ -124,8 +124,13 @@ On failure the call walks the fallback chain (`VISION_FALLBACKS`).
 
 ## Error handling
 - Retry 429/5xx/connection errors with exponential backoff (`VISION_RETRIES`).
-- Invalid image input → descriptive tool error.
-- HF failures → readable message (model target + status), not a traceback.
+- Invalid, unreadable, or empty image inputs (file, data URI, URL) → descriptive
+  tool error; URL fetches cap the read at `MAX_IMAGE_BYTES + 1` and close
+  `HTTPError` bodies (no tempfile leak).
+- Malformed provider responses (non-object JSON, missing `choices`/`pages`,
+  non-string content parts) → readable error, not `AttributeError`/`IndexError`.
+- Env edge values: empty model/base URL fall back to defaults; negative retries/
+  backoff clamp to 0; non-positive max tokens/timeout and NaN/inf fall back.
 
 ## Oh My Pi (OMP) integration
 The server is registered as a user-level MCP server so agents can call it from
@@ -201,10 +206,15 @@ Non-goals for packaging: no Docker image, no npm/JS packaging, no HTTP
 transport — stdio only, per BRIEF.
 
 ## Verification
-- Offline: `compileall`; `python -m unittest discover -s tests -q` (86 tests —
-  image parsing, config incl. OCR roles, prompts, transports, retries/fallback
-  chains, OCR engines with mocked httpx, server registration + role gating);
-  server starts and registers tools with no live provider call.
+- Offline: `compileall`; `python -m unittest discover -s tests -q` (294 tests —
+  image parsing incl. cap/empty/error paths, config incl. OCR roles and invalid
+  env values, prompts, transports, retries/fallback chains, OCR engines with
+  mocked httpx, benchmark resume/symlink refusal, server registration + role
+  gating + tool schemas, and a real stdio handshake per release variant);
+  server starts and registers tools with no live provider call. Branch coverage
+  (`coverage run --branch --source=look_n_see`) is 100% for every module except
+  the two unreachable retry-loop exits and the `__main__` entry point, which is
+  exercised in a subprocess.
 - Live (manual): provider tokens in env (or `omp token <provider>`), then
   `scripts/live_smoke.py` for vision and the `extract_text` tool for OCR
   (rapidocr engine = local). Verified 2026-10-22: default vision route,

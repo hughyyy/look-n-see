@@ -36,7 +36,9 @@ def _content_to_text(content: Any) -> str:
         return content
     if isinstance(content, list):
         return "".join(
-            part.get("text", "") for part in content if isinstance(part, dict)
+            part["text"]
+            for part in content
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
         )
     return str(content or "")
 
@@ -79,7 +81,17 @@ class OpenRouterTransport:
                 request=response.request,
                 response=response,
             )
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise OpenRouterError(
+                f"malformed OpenRouter response: invalid JSON ({exc})"
+            ) from exc
+        if not isinstance(data, dict):
+            raise OpenRouterError(
+                f"malformed OpenRouter response: expected a JSON object "
+                f"(body: {str(data)[:200]})"
+            )
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise OpenRouterError(

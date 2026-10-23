@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 
@@ -73,11 +74,29 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_positive_int(name: str, default: int) -> int:
+    value = _env_int(name, default)
+    return value if value > 0 else default
+
+
 def _env_float(name: str, default: float) -> float:
     try:
-        return float(os.environ.get(name, str(default)))
+        value = float(os.environ.get(name, str(default)))
     except ValueError:
         return default
+    # NaN/inf pass a plain float() parse but are never valid timeouts.
+    return value if math.isfinite(value) else default
+
+
+def _env_positive_float(name: str, default: float) -> float:
+    value = _env_float(name, default)
+    return value if value > 0 else default
+
+
+def _env_text(name: str) -> str | None:
+    """Env value with surrounding whitespace removed; blank counts as unset."""
+    value = os.environ.get(name)
+    return value.strip() if value and value.strip() else None
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -104,20 +123,20 @@ def load_config() -> Config:
     if provider not in {"auto", "hf", "openrouter"}:
         provider = "auto"
     return Config(
-        model=os.environ.get("VISION_MODEL", DEFAULT_MODEL),
-        endpoint=os.environ.get("HF_ENDPOINT") or None,
-        max_tokens=_env_int("VISION_MAX_TOKENS", 2048),
-        timeout=_env_float("VISION_TIMEOUT", 60.0),
-        retries=_env_int("VISION_RETRIES", 3),
-        retry_backoff=_env_float("VISION_RETRY_BACKOFF", 2.0),
+        model=os.environ.get("VISION_MODEL", "").strip() or DEFAULT_MODEL,
+        endpoint=_env_text("HF_ENDPOINT"),
+        max_tokens=_env_positive_int("VISION_MAX_TOKENS", 2048),
+        timeout=_env_positive_float("VISION_TIMEOUT", 60.0),
+        retries=max(0, _env_int("VISION_RETRIES", 3)),
+        retry_backoff=max(0.0, _env_float("VISION_RETRY_BACKOFF", 2.0)),
         provider=provider,
         fallbacks=_parse_fallbacks(os.environ.get("VISION_FALLBACKS")),
-        openrouter_api_key=os.environ.get("OPENROUTER_API_KEY") or None,
-        openrouter_base_url=os.environ.get("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_URL),
-        openrouter_site_url=os.environ.get("OPENROUTER_SITE_URL") or None,
-        openrouter_app_name=os.environ.get("OPENROUTER_APP_NAME") or None,
+        openrouter_api_key=_env_text("OPENROUTER_API_KEY"),
+        openrouter_base_url=_env_text("OPENROUTER_BASE_URL") or DEFAULT_OPENROUTER_URL,
+        openrouter_site_url=_env_text("OPENROUTER_SITE_URL"),
+        openrouter_app_name=_env_text("OPENROUTER_APP_NAME"),
         vision_enabled=_env_bool("VISION_ENABLED", True),
         ocr_enabled=_env_bool("OCR_ENABLED", True),
         ocr_engine=_parse_engine(os.environ.get("OCR_ENGINE")),
-        mistral_api_key=os.environ.get("MISTRAL_API_KEY") or None,
+        mistral_api_key=_env_text("MISTRAL_API_KEY"),
     )

@@ -133,7 +133,7 @@ class MistralOcr:
             "document": {"type": "document_url", "document_url": uri},
         }
         last_error: Exception | None = None
-        for attempt in range(self.config.retries + 1):
+        for attempt in range(max(0, self.config.retries) + 1):
             try:
                 response = self._http.post("/ocr", json=payload)
                 if response.status_code >= 400:
@@ -143,8 +143,19 @@ class MistralOcr:
                         response=response,
                     )
                 data = response.json()
+                if not isinstance(data, dict):
+                    raise OcrError(
+                        "malformed Mistral OCR response: expected a JSON object "
+                        f"(body: {str(data)[:200]})"
+                    )
                 pages = data.get("pages") or []
-                text = "\n\n".join(page.get("markdown", "") for page in pages)
+                if not isinstance(pages, list):
+                    raise OcrError("malformed Mistral OCR response: 'pages' is not a list")
+                if any(not isinstance(page, dict) for page in pages):
+                    raise OcrError(
+                        "malformed Mistral OCR response: page entry is not an object"
+                    )
+                text = "\n\n".join(str(page.get("markdown") or "") for page in pages)
                 return {
                     "text": text,
                     "engine": self.name,
@@ -155,7 +166,7 @@ class MistralOcr:
                 last_error = exc
                 if not _is_retryable(exc) or attempt >= self.config.retries:
                     break
-                time.sleep(self.config.retry_backoff * (2**attempt))
+                time.sleep(max(0.0, self.config.retry_backoff) * (2**attempt))
         raise OcrError(_describe_error(last_error))
 
 

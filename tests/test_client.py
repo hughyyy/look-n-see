@@ -2,14 +2,20 @@
 
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import httpx
 
-from look_n_see import client as client_mod
-from look_n_see.client import Completion, InferenceError, VisionClient, _describe_error, _is_retryable
+from look_n_see.client import (
+    Completion,
+    InferenceError,
+    VisionClient,
+    _describe_error,
+    _is_retryable,
+)
 from look_n_see.config import Config
-from look_n_see.openrouter import RawResult
+from look_n_see.openrouter import OpenRouterTransport, RawResult
 
 
 def make_config(**kw) -> Config:
@@ -94,6 +100,20 @@ class FallbackChainTests(unittest.TestCase):
         client.complete([{"role": "user"}], model="prim")
         self.assertEqual(len(fake.calls), 1)
 
+    def test_dedup_applies_after_failure_too(self):
+        # A repeated chain entry that was already tried and failed must not
+        # be retried; the error report lists each candidate once.
+        cfg = make_config(fallbacks=("fb", "fb"))
+        client = VisionClient(cfg)
+        fake = FakeTransport([RuntimeError("boom-a"), RuntimeError("boom-b")])
+        attach(fake, client)
+        with self.assertRaises(InferenceError) as ctx:
+            client.complete([{"role": "user"}], model="prim")
+        self.assertEqual(len(fake.calls), 2)  # prim, fb — repeated fb skipped
+        message = str(ctx.exception)
+        self.assertIn("[prim]", message)
+        self.assertEqual(message.count("[fb]"), 1)
+
     def test_empty_fallbacks_disables_chain(self):
         cfg = make_config(fallbacks=("fb",))
         client = VisionClient(cfg)
@@ -112,6 +132,80 @@ class FallbackChainTests(unittest.TestCase):
             client.complete([{"role": "user"}], model="prim")
         self.assertEqual(str(ctx.exception), "vision model call failed (prim): boom")
 
+    def test_fallbacks_argument_overrides_config(self):
+        cfg = make_config(fallbacks=("cfg-fb",))
+        client = VisionClient(cfg)
+        fake = FakeTransport([RuntimeError("boom-a"), RuntimeError("boom-b")])
+        attach(fake, client)
+        with self.assertRaises(InferenceError):
+            client.complete([{"role": "user"}], model="prim", fallbacks=("arg-fb",))
+        self.assertEqual([c[1] for c in fake.calls], ["prim", "arg-fb"])
+
+    def test_missing_openrouter_key_falls_through_to_hf_fallback(self):
+        cfg = make_config(model="openrouter:q/q", fallbacks=("hf:fb",))
+        client = VisionClient(cfg)
+        calls = []
+        client._hf.chat_completion = lambda messages, model, max_tokens: (
+            calls.append(model) or RawResult(text="hf ok")
+        )
+        self.assertEqual(client.complete([{"role": "user"}]), "hf ok")
+        self.assertEqual(calls, ["fb"])  # provider prefix stripped for the call
+
+    def test_hf_prefix_stripped_for_transport_call(self):
+        client = VisionClient(make_config())
+        fake = FakeTransport([])
+        attach(fake, client)
+        result = client.complete_with_meta([{"role": "user"}], model="hf:org/model")
+        self.assertEqual(fake.calls[0][1], "org/model")
+        self.assertEqual(result.provider, "hf")
+
+    def test_provider_openrouter_routes_bare_model(self):
+        cfg = make_config(provider="openrouter", openrouter_api_key="sk-test")
+        payload = {"choices": [{"message": {"content": "or"}}]}
+        with mock.patch(
+            "look_n_see.openrouter.httpx.Client.post",
+            return_value=httpx.Response(
+                200,
+                json=payload,
+                request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
+            ),
+        ) as post:
+            result = VisionClient(cfg).complete_with_meta(
+                [{"role": "user"}], model="q/q"
+            )
+        self.assertEqual(result.text, "or")
+        self.assertEqual(result.provider, "openrouter")
+        self.assertEqual(post.call_args.kwargs["json"]["model"], "q/q")
+
+    def test_provider_openrouter_bare_model_requires_key(self):
+        with self.assertRaisesRegex(InferenceError, "OPENROUTER_API_KEY"):
+            VisionClient(make_config(provider="openrouter")).complete(
+                [{"role": "user"}], model="q/q"
+            )
+
+    def test_hf_endpoint_does_not_pin_openrouter_fallback(self):
+        # HF_ENDPOINT pins only the HF transport; an OpenRouter fallback in the
+        # chain must still address its own model id.
+        cfg = make_config(
+            model="hf:primary",
+            endpoint="https://ep.example",
+            fallbacks=("openrouter:q/q",),
+            openrouter_api_key="sk-test",
+        )
+        client = VisionClient(cfg)
+        client._hf.chat_completion = mock.Mock(side_effect=RuntimeError("hf down"))
+        payload = {"choices": [{"message": {"content": "or ok"}}]}
+        with mock.patch(
+            "look_n_see.openrouter.httpx.Client.post",
+            return_value=httpx.Response(
+                200,
+                json=payload,
+                request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
+            ),
+        ) as post:
+            self.assertEqual(client.complete([{"role": "user"}]), "or ok")
+        self.assertEqual(post.call_args.kwargs["json"]["model"], "q/q")
+
 
 class RetryTests(unittest.TestCase):
     def test_retries_then_succeeds(self):
@@ -124,6 +218,28 @@ class RetryTests(unittest.TestCase):
         self.assertEqual(result.text, "ok")
         self.assertEqual(result.retries, 2)
         self.assertEqual(sleep.call_count, 2)
+
+    def test_backoff_is_exponential(self):
+        cfg = make_config(retries=2, retry_backoff=2.0)
+        client = VisionClient(cfg)
+        fake = FakeTransport([_http_error(429), _http_error(503)])
+        attach(fake, client)
+        with mock.patch.object(time, "sleep") as sleep:
+            client.complete([{"role": "user"}], model="prim")
+        sleeps = [c.args[0] for c in sleep.call_args_list]
+        self.assertEqual(sleeps, [2.0, 4.0])  # backoff * 2**attempt
+
+    def test_retries_exhausted_then_fallback_used(self):
+        # The full policy interplay: retry the primary model *then* escalate
+        # to the fallback only after retries are exhausted.
+        cfg = make_config(retries=2, fallbacks=("fb",))
+        client = VisionClient(cfg)
+        fake = FakeTransport([_http_error(429), _http_error(429), _http_error(429)])
+        attach(fake, client)
+        with mock.patch.object(time, "sleep"):
+            result = client.complete([{"role": "user"}], model="prim")
+        self.assertEqual(result, "ok")
+        self.assertEqual([c[1] for c in fake.calls], ["prim", "prim", "prim", "fb"])
 
     def test_retries_exhausted_raises(self):
         cfg = make_config(retries=1)
@@ -205,12 +321,283 @@ class RetryTests(unittest.TestCase):
         self.assertGreaterEqual(result.latency_s, 0.0)
         self.assertEqual(result.retries, 0)
 
+    def test_negative_retries_still_attempts_once(self):
+        client = VisionClient(make_config(retries=-1))
+        fake = FakeTransport([])
+        attach(fake, client)
+        self.assertEqual(client.complete([{"role": "user"}], model="prim"), "ok")
+        self.assertEqual(len(fake.calls), 1)
+
+    def test_last_error_reported_after_retries(self):
+        request = httpx.Request("POST", "https://x")
+        rate_limited = httpx.HTTPStatusError(
+            "first",
+            request=request,
+            response=httpx.Response(
+                429, json={"error": {"message": "rate limited"}}, request=request
+            ),
+        )
+        bad_key = httpx.HTTPStatusError(
+            "second",
+            request=request,
+            response=httpx.Response(
+                401, json={"error": {"message": "bad key"}}, request=request
+            ),
+        )
+        client = VisionClient(make_config(retries=1))
+        fake = FakeTransport([rate_limited, bad_key])
+        attach(fake, client)
+        with mock.patch.object(time, "sleep"):
+            with self.assertRaises(InferenceError) as ctx:
+                client.complete([{"role": "user"}], model="prim")
+        self.assertIn("bad key", str(ctx.exception))
+        self.assertNotIn("rate limited", str(ctx.exception))
+
+
+class HfTransportTests(unittest.TestCase):
+    def _hf_client_for(self, cfg, response):
+        """Build a VisionClient whose HF InferenceClient is fully mocked."""
+        fake_inference_client = mock.Mock()
+        fake_inference_client.chat_completion.return_value = response
+        return VisionClient(cfg, client=fake_inference_client)
+
+    def _hf_response(self, content="say", usage=None):
+        message = mock.Mock()
+        message.content = content
+        choice = mock.Mock()
+        choice.message = message
+        choice.finish_reason = "stop"
+        response = mock.Mock()
+        response.choices = [choice]
+        if usage is not None:
+            # SimpleNamespace keeps __dict__ clean of Mock internals.
+            response.usage = SimpleNamespace(completion_tokens=usage)
+        else:
+            response.usage = None
+        return response
+
+    def test_hf_chat_completion_roundtrip(self):
+        cfg = make_config(model="some/model")
+        client = self._hf_client_for(cfg, self._hf_response("hello", usage=3))
+        result = client._hf.chat_completion(
+            [{"role": "user"}], "some/model", 64
+        )
+        self.assertEqual(result.text, "hello")
+        self.assertEqual(result.finish_reason, "stop")
+        self.assertEqual(result.usage, {"completion_tokens": 3})
+        client._hf._client.chat_completion.assert_called_once_with(
+            messages=[{"role": "user"}], model="some/model", max_tokens=64
+        )
+
+    def test_hf_endpoint_pins_call_model(self):
+        # A dedicated endpoint URL replaces the per-call model id.
+        cfg = make_config(model="some/model", endpoint="https://ep.example")
+        client = self._hf_client_for(cfg, self._hf_response())
+        client._hf.chat_completion([{"role": "user"}], "ignored/model", 64)
+        call_kwargs = client._hf._client.chat_completion.call_args.kwargs
+        self.assertEqual(call_kwargs["model"], "https://ep.example")
+
+    def test_hf_missing_content_becomes_empty(self):
+        cfg = make_config()
+        client = self._hf_client_for(cfg, self._hf_response(content=None))
+        result = client._hf.chat_completion([], "m", 64)
+        self.assertEqual(result.text, "")
+
+    def test_hf_complete_without_usage(self):
+        cfg = make_config()
+        client = self._hf_client_for(cfg, self._hf_response(usage=None))
+        result = client._hf.chat_completion([], "m", 64)
+        self.assertIsNone(result.usage)
+
+    def test_hf_empty_choices_raises_clear_error(self):
+        client = self._hf_client_for(make_config(), SimpleNamespace(choices=[], usage=None))
+        with self.assertRaisesRegex(InferenceError, "no choices"):
+            client._hf.chat_completion([], "m", 64)
+
+    def test_hf_missing_choices_raises_clear_error(self):
+        client = self._hf_client_for(make_config(), SimpleNamespace())
+        with self.assertRaisesRegex(InferenceError, "no choices"):
+            client._hf.chat_completion([], "m", 64)
+
+    def test_hf_usage_dict_is_preserved(self):
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="hi"), finish_reason="stop"
+                )
+            ],
+            usage={"completion_tokens": 2},
+        )
+        client = self._hf_client_for(make_config(), response)
+        result = client._hf.chat_completion([], "m", 64)
+        self.assertEqual(result.usage, {"completion_tokens": 2})
+
+    def test_hf_message_missing_content_is_empty(self):
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(message=SimpleNamespace(), finish_reason=None)
+            ],
+            usage=None,
+        )
+        client = self._hf_client_for(make_config(), response)
+        result = client._hf.chat_completion([], "m", 64)
+        self.assertEqual(result.text, "")
+
+    def test_hf_constructor_uses_token_and_timeout(self):
+        cfg = make_config(timeout=7.5)
+        with mock.patch.dict("os.environ", {"HF_TOKEN": "hf-test"}), mock.patch(
+            "look_n_see.client.InferenceClient"
+        ) as inference_client:
+            VisionClient(cfg)
+        kwargs = inference_client.call_args.kwargs
+        self.assertEqual(kwargs["token"], "hf-test")
+        self.assertEqual(kwargs["timeout"], 7.5)
+
+    def test_hf_endpoint_pins_model_through_complete(self):
+        cfg = make_config(model="some/model", endpoint="https://ep.example")
+        client = self._hf_client_for(cfg, self._hf_response("ok"))
+        self.assertEqual(
+            client.complete([{"role": "user"}], model="other/model"), "ok"
+        )
+        call_kwargs = client._hf._client.chat_completion.call_args.kwargs
+        self.assertEqual(call_kwargs["model"], "https://ep.example")
+
+    def test_hf_empty_usage_namespace_is_none(self):
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="x"), finish_reason=None
+                )
+            ],
+            usage=SimpleNamespace(),
+        )
+        client = self._hf_client_for(make_config(), response)
+        self.assertIsNone(client._hf.chat_completion([], "m", 64).usage)
+
+
+class TransportSelectionTests(unittest.TestCase):
+    def test_hf_branch_returns_internal_hf_transport(self):
+        client = VisionClient(make_config())
+        self.assertIs(client._transport_for("hf"), client._hf)
+
+    def test_openrouter_transport_created_once_and_cached(self):
+        cfg = make_config(openrouter_api_key="sk-test")
+        client = VisionClient(cfg)
+        first = client._transport_for("openrouter")
+        second = client._transport_for("openrouter")
+        self.assertIsInstance(first, OpenRouterTransport)
+        self.assertIs(first, second)
+
+
+class DefaultModelTests(unittest.TestCase):
+    def test_default_model_when_arg_omitted(self):
+        cfg = make_config(model="cfg-model")
+        client = VisionClient(cfg)
+        fake = FakeTransport([])
+        attach(fake, client)
+        client.complete([{"role": "user"}])
+        self.assertEqual(fake.calls[0][1], "cfg-model")
+        self.assertEqual(fake.calls[0][2], 64)  # config max_tokens
+
+    def test_per_call_max_tokens_override(self):
+        cfg = make_config()
+        client = VisionClient(cfg)
+        fake = FakeTransport([])
+        attach(fake, client)
+        client.complete([{"role": "user"}], max_tokens=999)
+        self.assertEqual(fake.calls[0][2], 999)
+
+    def test_complete_returns_text_only(self):
+        cfg = make_config()
+        client = VisionClient(cfg)
+        fake = FakeTransport([])
+        attach(fake, client)
+        self.assertEqual(client.complete([{"role": "user"}]), "ok")
+
+    def test_zero_max_tokens_uses_config(self):
+        cfg = make_config()
+        client = VisionClient(cfg)
+        fake = FakeTransport([])
+        attach(fake, client)
+        client.complete([{"role": "user"}], max_tokens=0)
+        self.assertEqual(fake.calls[0][2], 64)  # falsy -> config max_tokens
+
 
 class ErrorHelpersTests(unittest.TestCase):
     def test_is_retryable_statuses(self):
         for status in (429, 500, 502, 503, 504):
             self.assertTrue(_is_retryable(_http_error(status)), status)
         self.assertFalse(_is_retryable(_http_error(401)))
+
+    def test_is_retryable_connection_failures(self):
+        self.assertTrue(_is_retryable(ConnectionError("down")))
+        self.assertTrue(_is_retryable(TimeoutError("slow")))
+
+    def test_is_retryable_by_class_name(self):
+        # httpx/urllib3 style exceptions without a response attribute.
+        class ReadTimeout(Exception):
+            pass
+
+        class NotFound(Exception):
+            pass
+
+        self.assertTrue(_is_retryable(ReadTimeout("t")))
+        self.assertFalse(_is_retryable(NotFound("x")))
+        self.assertFalse(_is_retryable(ValueError("bad")))
+
+    def test_non_retryable_status_boundaries(self):
+        # Policy boundary: only 429 and 5xx-gateway/availability statuses retry.
+        for status in (400, 401, 408, 501, 505):
+            with self.subTest(status=status):
+                self.assertFalse(_is_retryable(_http_error(status)), status)
+
+    def test_is_retryable_real_httpx_timeouts(self):
+        for exc in (httpx.ReadTimeout("t"), httpx.ConnectTimeout("t")):
+            with self.subTest(exc=type(exc).__name__):
+                self.assertTrue(_is_retryable(exc))
+
+    def test_is_retryable_real_httpx_connect_error(self):
+        # The real transient failure mode: connection refused. httpx wraps it
+        # in its own ConnectError, which must be retryable.
+        import socket
+
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        try:
+            httpx.Client(timeout=1.0).post(f"http://127.0.0.1:{port}/x")
+        except httpx.ConnectError as exc:
+            self.assertTrue(_is_retryable(exc))
+        else:
+            self.fail("expected httpx.ConnectError")
+
+    def test_connect_error_retried_then_succeeds(self):
+        # End-to-end: a connection failure triggers the backoff retry policy.
+        import socket
+
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+
+        cfg = make_config(retries=1, retry_backoff=0.01)
+        client = VisionClient(cfg, client=mock.Mock())
+        real = client._hf
+        attempts = {"n": 0}
+
+        def flaky_chat_completion(messages, model, max_tokens):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise httpx.ConnectError(
+                    f"All connection attempts failed to 127.0.0.1:{port}"
+                )
+            return RawResult(text="recovered")
+
+        real.chat_completion = flaky_chat_completion
+        result = client.complete([{"role": "user"}], model="m")
+        self.assertEqual(result, "recovered")
+        self.assertEqual(attempts["n"], 2)
 
     def test_describe_error_uses_api_message(self):
         request = httpx.Request("POST", "https://x")
@@ -219,6 +606,48 @@ class ErrorHelpersTests(unittest.TestCase):
         )
         exc = httpx.HTTPStatusError("err", request=request, response=response)
         self.assertEqual(_describe_error(exc), "402: Insufficient credits")
+
+    def test_describe_error_string_error_body(self):
+        request = httpx.Request("POST", "https://x")
+        response = httpx.Response(
+            402, json={"error": "Insufficient credits"}, request=request
+        )
+        exc = httpx.HTTPStatusError("err", request=request, response=response)
+        self.assertEqual(_describe_error(exc), "402: Insufficient credits")
+
+    def test_describe_error_non_json_body_falls_back(self):
+        request = httpx.Request("POST", "https://x")
+        response = httpx.Response(500, text="<html>boom</html>", request=request)
+        exc = httpx.HTTPStatusError("err", request=request, response=response)
+        self.assertEqual(_describe_error(exc), "err")
+
+    def test_describe_error_empty_json_body_falls_back(self):
+        request = httpx.Request("POST", "https://x")
+        response = httpx.Response(500, json={}, request=request)
+        exc = httpx.HTTPStatusError("err", request=request, response=response)
+        self.assertEqual(_describe_error(exc), "err")
+
+    def test_is_retryable_response_without_status_code(self):
+        # A response-like object missing status_code falls through to the
+        # class-name check and is not retryable.
+        class WeirdResponse:
+            pass
+
+        exc = RuntimeError("boom")
+        exc.response = WeirdResponse()
+        self.assertFalse(_is_retryable(exc))
+
+    def test_describe_error_non_dict_json_body(self):
+        request = httpx.Request("POST", "https://x")
+        response = httpx.Response(500, json=["boom"], request=request)
+        exc = httpx.HTTPStatusError("err", request=request, response=response)
+        self.assertEqual(_describe_error(exc), "err")
+
+    def test_describe_error_error_without_message(self):
+        request = httpx.Request("POST", "https://x")
+        response = httpx.Response(500, json={"error": {"code": "bad"}}, request=request)
+        exc = httpx.HTTPStatusError("err", request=request, response=response)
+        self.assertEqual(_describe_error(exc), "err")
 
 
 if __name__ == "__main__":

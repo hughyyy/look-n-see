@@ -1,10 +1,17 @@
 """Unit tests for provider-aware configuration."""
 
+import dataclasses
 import os
 import unittest
 from unittest import mock
 
-from look_n_see.config import DEFAULT_FALLBACKS, Config, load_config
+from look_n_see.config import (
+    DEFAULT_FALLBACKS,
+    DEFAULT_MODEL,
+    DEFAULT_OPENROUTER_URL,
+    Config,
+    load_config,
+)
 
 
 def make_config(**kw) -> Config:
@@ -36,6 +43,12 @@ class ProviderResolutionTests(unittest.TestCase):
         cfg = make_config(provider="hf")
         self.assertEqual(cfg.provider_for("q/q"), "hf")
         self.assertEqual(cfg.provider_for("openrouter:q/q"), "openrouter")
+
+    def test_unknown_provider_string_routes_bare_ids_to_hf(self):
+        # Config is frozen but constructible directly; an out-of-vocabulary
+        # provider must not route bare ids anywhere surprising.
+        cfg = make_config(provider="banana")
+        self.assertEqual(cfg.provider_for("q/q"), "hf")
 
     def test_strip_prefix(self):
         self.assertEqual(Config.strip_prefix("openrouter:a/b"), "a/b")
@@ -145,6 +158,172 @@ class LoadConfigTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"MISTRAL_API_KEY": "key123"}, clear=False):
             cfg = load_config()
         self.assertEqual(cfg.mistral_api_key, "key123")
+
+
+class TargetPropertyTests(unittest.TestCase):
+    def test_target_defaults_to_model(self):
+        self.assertEqual(make_config(model="m", endpoint=None).target, "m")
+
+    def test_target_prefers_endpoint(self):
+        self.assertEqual(
+            make_config(model="m", endpoint="https://ep.example").target,
+            "https://ep.example",
+        )
+
+
+class LoadConfigEdgeTests(unittest.TestCase):
+    def test_invalid_provider_falls_back_to_auto(self):
+        with mock.patch.dict(os.environ, {"VISION_PROVIDER": "banana"}, clear=False):
+            cfg = load_config()
+        self.assertEqual(cfg.provider, "auto")
+
+    def test_bad_float_falls_back_to_default(self):
+        with mock.patch.dict(os.environ, {"VISION_TIMEOUT": "slow"}, clear=False):
+            cfg = load_config()
+        self.assertEqual(cfg.timeout, 60.0)
+
+    def test_bad_retries_falls_back_to_default(self):
+        with mock.patch.dict(os.environ, {"VISION_RETRIES": "many"}, clear=False):
+            cfg = load_config()
+        self.assertEqual(cfg.retries, 3)
+
+    def test_role_flags_accept_truthy_forms(self):
+        with mock.patch.dict(
+            os.environ, {"VISION_ENABLED": "true", "OCR_ENABLED": "on"}, clear=False,
+        ):
+            cfg = load_config()
+        self.assertTrue(cfg.vision_enabled)
+        self.assertTrue(cfg.ocr_enabled)
+
+    def test_unrecognized_bool_keeps_default_on(self):
+        # Only explicit off forms disable a role; anything else stays enabled.
+        with mock.patch.dict(
+            os.environ,
+            {"VISION_ENABLED": "maybe", "OCR_ENABLED": "banana"},
+            clear=False,
+        ):
+            cfg = load_config()
+        self.assertTrue(cfg.vision_enabled)
+        self.assertTrue(cfg.ocr_enabled)
+
+    def test_empty_or_blank_model_falls_back_to_default(self):
+        for raw in ("", "   "):
+            with self.subTest(raw=raw):
+                with mock.patch.dict(os.environ, {"VISION_MODEL": raw}, clear=False):
+                    self.assertEqual(load_config().model, DEFAULT_MODEL)
+
+    def test_model_is_stripped(self):
+        with mock.patch.dict(
+            os.environ, {"VISION_MODEL": "  openrouter:q/q  "}, clear=False
+        ):
+            self.assertEqual(load_config().model, "openrouter:q/q")
+
+    def test_empty_base_url_falls_back_to_default(self):
+        for raw in ("", "   "):
+            with self.subTest(raw=raw):
+                with mock.patch.dict(
+                    os.environ, {"OPENROUTER_BASE_URL": raw}, clear=False
+                ):
+                    cfg = load_config()
+                self.assertEqual(cfg.openrouter_base_url, DEFAULT_OPENROUTER_URL)
+
+    def test_blank_endpoint_is_none(self):
+        with mock.patch.dict(os.environ, {"HF_ENDPOINT": "   "}, clear=False):
+            self.assertIsNone(load_config().endpoint)
+
+    def test_negative_retries_clamped_to_zero(self):
+        with mock.patch.dict(os.environ, {"VISION_RETRIES": "-2"}, clear=False):
+            self.assertEqual(load_config().retries, 0)
+
+    def test_zero_retries_preserved(self):
+        with mock.patch.dict(os.environ, {"VISION_RETRIES": "0"}, clear=False):
+            self.assertEqual(load_config().retries, 0)
+
+    def test_nonpositive_max_tokens_falls_back(self):
+        for raw in ("0", "-5"):
+            with self.subTest(raw=raw):
+                with mock.patch.dict(
+                    os.environ, {"VISION_MAX_TOKENS": raw}, clear=False
+                ):
+                    self.assertEqual(load_config().max_tokens, 2048)
+
+    def test_invalid_timeout_falls_back(self):
+        # Zero/negative timeouts would mean "no deadline" or an error in httpx;
+        # NaN/inf parse as floats but are never a usable timeout.
+        for raw in ("0", "-1", "nan", "inf"):
+            with self.subTest(raw=raw):
+                with mock.patch.dict(os.environ, {"VISION_TIMEOUT": raw}, clear=False):
+                    self.assertEqual(load_config().timeout, 60.0)
+
+    def test_negative_backoff_clamped_to_zero(self):
+        with mock.patch.dict(
+            os.environ, {"VISION_RETRY_BACKOFF": "-3"}, clear=False
+        ):
+            self.assertEqual(load_config().retry_backoff, 0.0)
+
+    def test_provider_and_engine_whitespace_normalized(self):
+        with mock.patch.dict(
+            os.environ,
+            {"VISION_PROVIDER": "  OpenRouter ", "OCR_ENGINE": " Mistral "},
+            clear=False,
+        ):
+            cfg = load_config()
+        self.assertEqual(cfg.provider, "openrouter")
+        self.assertEqual(cfg.ocr_engine, "mistral")
+
+    def test_fallback_separators_and_whitespace(self):
+        with mock.patch.dict(
+            os.environ, {"VISION_FALLBACKS": "a,\n b\tc ,, d "}, clear=False
+        ):
+            self.assertEqual(load_config().fallbacks, ("a", "b", "c", "d"))
+
+
+    def test_whitespace_only_metadata_and_keys_are_unset(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "OPENROUTER_SITE_URL": "   ",
+                "OPENROUTER_APP_NAME": "\t",
+                "OPENROUTER_API_KEY": " ",
+                "MISTRAL_API_KEY": "\n",
+            },
+            clear=False,
+        ):
+            cfg = load_config()
+        self.assertIsNone(cfg.openrouter_site_url)
+        self.assertIsNone(cfg.openrouter_app_name)
+        self.assertIsNone(cfg.openrouter_api_key)
+        self.assertIsNone(cfg.mistral_api_key)
+
+    def test_credentials_and_metadata_are_stripped(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "OPENROUTER_SITE_URL": " https://site.example ",
+                "OPENROUTER_APP_NAME": " bench ",
+                "OPENROUTER_API_KEY": "sk-test\n",
+                "MISTRAL_API_KEY": "\tkey123 ",
+            },
+            clear=False,
+        ):
+            cfg = load_config()
+        self.assertEqual(cfg.openrouter_site_url, "https://site.example")
+        self.assertEqual(cfg.openrouter_app_name, "bench")
+        self.assertEqual(cfg.openrouter_api_key, "sk-test")
+        self.assertEqual(cfg.mistral_api_key, "key123")
+
+    def test_delimiter_only_fallbacks_disable_chain(self):
+        with mock.patch.dict(os.environ, {"VISION_FALLBACKS": " ,\n\t, "}, clear=False):
+            self.assertEqual(load_config().fallbacks, ())
+
+    def test_whitespace_padded_int_accepted(self):
+        with mock.patch.dict(os.environ, {"VISION_MAX_TOKENS": " 512 "}, clear=False):
+            self.assertEqual(load_config().max_tokens, 512)
+
+    def test_config_is_immutable(self):
+        cfg = make_config()
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            cfg.model = "other"
 
 
 if __name__ == "__main__":
