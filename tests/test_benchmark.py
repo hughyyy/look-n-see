@@ -11,9 +11,10 @@ from pathlib import Path
 from look_n_see.benchmark import (
     BenchmarkSpec,
     _call_row,
-    _quantiles,
     _repetition_rate,
+    _quantiles,
     _slug,
+    _unique_slugs,
     _version,
     classify,
     run_benchmark,
@@ -242,6 +243,23 @@ class RunAndResumeTests(unittest.TestCase):
         )
         self.assertEqual(json.loads((run_dir / "run.json").read_text()), original)
 
+    def test_rows_and_metadata_record_image_paths(self):
+        run_dir = run_benchmark(self.spec, FakeBenchClient(), progress=False)
+        meta = json.loads((run_dir / "run.json").read_text())
+        self.assertEqual(len(meta["image_paths"]), len(self.images))
+        self.assertTrue(all(Path(p).is_absolute() for p in meta["image_paths"]))
+        rows = [json.loads(l) for l in (run_dir / "results.jsonl").read_text().splitlines()]
+        self.assertTrue(all(r["path"] for r in rows))
+        self.assertEqual({r["image"] for r in rows}, {"a.png", "b.png", "c.png"})
+
+    def test_no_resume_truncates_existing_results(self):
+        run_dir = run_benchmark(self.spec, FakeBenchClient(), progress=False)
+        count = len((run_dir / "results.jsonl").read_text().splitlines())
+        self.assertEqual(count, 12)
+        run_benchmark(self.spec, FakeBenchClient(), resume=False, progress=False)
+        count2 = len((run_dir / "results.jsonl").read_text().splitlines())
+        self.assertEqual(count2, 12)  # rerun replaced, never doubled
+
     @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "O_NOFOLLOW unavailable")
     def test_symlinked_results_file_is_refused(self):
         run_dir = self.root / "link-results"
@@ -403,6 +421,22 @@ class HelperEdgeTests(unittest.TestCase):
         self.assertTrue(row["ok"])
         self.assertEqual(row["retries"], 2)
 
+    def test_call_row_records_failure_retry_metadata(self):
+        class FailingClient:
+            config = Config(
+                model="m", endpoint=None, max_tokens=64, timeout=5.0,
+                retries=0, retry_backoff=1.0,
+            )
+
+            def complete_with_meta(self, messages, *, model, fallbacks=None, **kw):
+                raise InferenceError("boom", retries=3, latency_s=1.5)
+
+        row = _call_row("m1", "a.png", 1, "p", [], FailingClient(), "a.png")
+        self.assertFalse(row["ok"])
+        self.assertEqual(row["retries"], 3)
+        self.assertEqual(row["latency_s"], 1.5)
+        self.assertEqual(row["path"], "a.png")
+
     def test_repetition_rate_none_without_pairs(self):
         rows = [
             {"model": "m", "image": "a.png", "ok": False, "text": "x"},
@@ -422,7 +456,7 @@ class HelperEdgeTests(unittest.TestCase):
         ]
         self.assertEqual(_repetition_rate(mixed), 0.0)
         single_rep = [{"model": "m", "image": "a.png", "ok": True, "text": "x"}]
-        self.assertEqual(_repetition_rate(single_rep), 0.0)
+        self.assertIsNone(_repetition_rate(single_rep))
         self.assertIsNone(_repetition_rate([]))
 
     def test_classify_refusal_wins_over_terse(self):
@@ -474,6 +508,16 @@ class HelperEdgeTests(unittest.TestCase):
     def test_classify_leading_bracket_is_json_markers(self):
         self.assertIn("json_markers", classify("[1, 2, 3]"))
 
+    def test_quantiles_p90_is_nearest_rank(self):
+        values = [float(i) for i in range(1, 11)]
+        self.assertEqual(_quantiles(values)["p90"], 9.0)
+
+    def test_unique_slugs_disambiguate_collisions(self):
+        slugs = _unique_slugs(["a/b", "a.b", "clean"])
+        self.assertEqual(slugs["clean"], "clean")
+        self.assertNotEqual(slugs["a/b"], slugs["a.b"])
+        self.assertNotEqual(slugs["a/b"], "a.b")
+
 
 class SummarizeErrorTests(unittest.TestCase):
     def test_failed_row_without_error_bucketed_unknown(self):
@@ -503,6 +547,41 @@ class SummarizeErrorTests(unittest.TestCase):
             (run_dir / "results.jsonl").write_text("")
             summary = summarize(run_dir, write_files=False)
         self.assertEqual(summary["models"], {})
+
+    def test_corrupt_and_truncated_rows_are_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            (run_dir / "run.json").write_text(
+                json.dumps({"models": ["m"], "images": ["a.png"], "reps": 2})
+            )
+            good = json.dumps(
+                {
+                    "model": "m",
+                    "image": "a.png",
+                    "path": "/img/a.png",
+                    "rep": 1,
+                    "ok": True,
+                    "text": "text",
+                    "latency_s": 1.0,
+                    "flags": ["normal"],
+                }
+            )
+            (run_dir / "results.jsonl").write_text(
+                good + "\n\nnot json\n" + json.dumps([1, 2]) + "\n"
+            )
+            summary = summarize(run_dir, write_files=False)
+        self.assertEqual(summary["models"]["m"]["calls"], 1)
+        self.assertEqual(summary["models"]["m"]["ok"], 1)
+
+    def test_corrupt_rows_do_not_break_file_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            (run_dir / "run.json").write_text(json.dumps({"models": ["m"]}))
+            (run_dir / "results.jsonl").write_text("garbage\n")
+            summarize(run_dir, write_files=True)
+            self.assertTrue((run_dir / "summary.json").exists())
 
 
 class SummarizeFlaggedTests(unittest.TestCase):
@@ -545,7 +624,7 @@ class SummarizeFlaggedTests(unittest.TestCase):
         self.assertEqual(sample["image"], "a.png")
         self.assertEqual(sample["flags"], ["terse"])
         self.assertEqual(len(sample["snippet"]), 200)  # truncated
-        self.assertNotIn("terse", stats["flag_counts"].get("normal", {}))
+        self.assertNotIn("normal", stats["flag_counts"])
 
     def test_flagged_samples_are_capped_at_twenty(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -110,3 +110,23 @@ long-lived server process is the suspect**.
 7. **Report back with:** call-count-to-degradation, first non-conforming
    output verbatim + its raw JSON, whether restart recovered it, and one
    paragraph recommending the fix with the evidence for it.
+
+## Mitigations shipped (2026-10-23)
+
+- **`health` tool** — every release variant registers a no-network JSON report
+  of roles, routing, credential presence, deadline and URL policy, so a client
+  can verify configuration before/after a restart.
+- **Response-shape flagging** — `sanity.annotate` appends
+  `[look-n-see warning: response flagged as empty|refusal|gen_payload ...]` to
+  vision results, using the same classifier as the benchmark harness. This
+  makes a degraded process visible to the calling model instead of silently
+  returning canned text.
+- **Deadline budgeting** — one `VISION_DEADLINE` budget per call (default
+  100 s) across retries and fallbacks keeps a stuck/degraded provider from
+  consuming the client's whole request timeout.
+- **Observability retained** — benchmark rows record provider, transport,
+  finish_reason, usage, latency and retries (including failed attempts), and
+  the failure message carries retry/latency metadata.
+
+Still open: raw-response logging shipped by default, and automatic client
+recreation/restart after N consecutive non-conforming responses.

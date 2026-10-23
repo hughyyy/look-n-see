@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 from dataclasses import dataclass
@@ -16,6 +17,8 @@ DEFAULT_FALLBACKS = (
     "Qwen/Qwen3-VL-30B-A3B-Instruct",
     "openrouter:google/gemma-4-31b-it",
 )
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -38,11 +41,32 @@ class Config:
     ocr_enabled: bool = True
     ocr_engine: str = "vlm"  # vlm | rapidocr | mistral
     mistral_api_key: str | None = None
+    # Wall-clock budget for one tool call across retries and fallbacks. The
+    # per-request timeout is derived from the remaining budget, so a call can
+    # never outlive its MCP client's request timeout by much.
+    deadline: float = 100.0
+    # URL image inputs default to public hosts only (SSRF guard); opt out for
+    # local/dev servers that fetch loopback or LAN URLs.
+    allow_private_urls: bool = False
 
     @property
     def target(self) -> str:
         """The default model id or dedicated endpoint URL passed to the client."""
         return self.endpoint or self.model
+
+    @staticmethod
+    def normalize_model_id(model_id: str) -> str:
+        """Canonical model id: trimmed, with a case-insensitive provider prefix.
+
+        Bare ids stay byte-identical (HF/OpenRouter slugs are case-sensitive);
+        only the prefix spelling and surrounding whitespace are normalized.
+        """
+        value = model_id.strip()
+        lowered = value.lower()
+        for prefix in (OPENROUTER_PREFIX, HF_PREFIX):
+            if lowered.startswith(prefix):
+                return prefix + value[len(prefix):].strip()
+        return value
 
     def provider_for(self, model_id: str) -> str:
         """Transport provider for a model id.
@@ -50,9 +74,10 @@ class Config:
         An explicit `openrouter:`/`hf:` prefix always wins; otherwise the
         `provider` setting decides the interpretation of bare ids.
         """
-        if model_id.startswith(OPENROUTER_PREFIX):
+        normalized = self.normalize_model_id(model_id)
+        if normalized.startswith(OPENROUTER_PREFIX):
             return "openrouter"
-        if model_id.startswith(HF_PREFIX):
+        if normalized.startswith(HF_PREFIX):
             return "hf"
         if self.provider == "openrouter":
             return "openrouter"
@@ -60,11 +85,12 @@ class Config:
 
     @staticmethod
     def strip_prefix(model_id: str) -> str:
-        if model_id.startswith(OPENROUTER_PREFIX):
-            return model_id[len(OPENROUTER_PREFIX):]
-        if model_id.startswith(HF_PREFIX):
-            return model_id[len(HF_PREFIX):]
-        return model_id
+        normalized = Config.normalize_model_id(model_id)
+        if normalized.startswith(OPENROUTER_PREFIX):
+            return normalized[len(OPENROUTER_PREFIX):]
+        if normalized.startswith(HF_PREFIX):
+            return normalized[len(HF_PREFIX):]
+        return normalized
 
 
 def _env_int(name: str, default: int) -> int:
@@ -115,13 +141,27 @@ def _parse_fallbacks(raw: str | None) -> tuple[str, ...]:
 
 def _parse_engine(raw: str | None) -> str:
     engine = (raw or "vlm").strip().lower()
-    return engine if engine in {"vlm", "rapidocr", "mistral"} else "vlm"
+    if engine not in {"vlm", "rapidocr", "mistral"}:
+        _log.warning(
+            "OCR_ENGINE=%r is not one of vlm/rapidocr/mistral; falling back to 'vlm'",
+            raw,
+        )
+        return "vlm"
+    return engine
+
+
+def _parse_provider(raw: str | None) -> str:
+    provider = (raw or "auto").strip().lower()
+    if provider not in {"auto", "hf", "openrouter"}:
+        _log.warning(
+            "VISION_PROVIDER=%r is not auto/hf/openrouter; falling back to 'auto'",
+            raw,
+        )
+        return "auto"
+    return provider
 
 
 def load_config() -> Config:
-    provider = os.environ.get("VISION_PROVIDER", "auto").strip().lower()
-    if provider not in {"auto", "hf", "openrouter"}:
-        provider = "auto"
     return Config(
         model=os.environ.get("VISION_MODEL", "").strip() or DEFAULT_MODEL,
         endpoint=_env_text("HF_ENDPOINT"),
@@ -129,7 +169,7 @@ def load_config() -> Config:
         timeout=_env_positive_float("VISION_TIMEOUT", 60.0),
         retries=max(0, _env_int("VISION_RETRIES", 3)),
         retry_backoff=max(0.0, _env_float("VISION_RETRY_BACKOFF", 2.0)),
-        provider=provider,
+        provider=_parse_provider(os.environ.get("VISION_PROVIDER")),
         fallbacks=_parse_fallbacks(os.environ.get("VISION_FALLBACKS")),
         openrouter_api_key=_env_text("OPENROUTER_API_KEY"),
         openrouter_base_url=_env_text("OPENROUTER_BASE_URL") or DEFAULT_OPENROUTER_URL,
@@ -139,4 +179,6 @@ def load_config() -> Config:
         ocr_enabled=_env_bool("OCR_ENABLED", True),
         ocr_engine=_parse_engine(os.environ.get("OCR_ENGINE")),
         mistral_api_key=_env_text("MISTRAL_API_KEY"),
+        deadline=_env_positive_float("VISION_DEADLINE", 100.0),
+        allow_private_urls=_env_bool("VISION_ALLOW_PRIVATE_URLS", False),
     )

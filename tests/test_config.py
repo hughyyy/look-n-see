@@ -27,7 +27,18 @@ def make_config(**kw) -> Config:
     return Config(**base)
 
 
-class ProviderResolutionTests(unittest.TestCase):
+
+
+class _EnvIsolated(unittest.TestCase):
+    """Config tests must not inherit VISION_*/OCR_* from the developer shell."""
+
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, {}, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class ProviderResolutionTests(_EnvIsolated):
     def test_auto_prefix_wins(self):
         cfg = make_config(provider="auto")
         self.assertEqual(cfg.provider_for("openrouter:q/q"), "openrouter")
@@ -50,6 +61,19 @@ class ProviderResolutionTests(unittest.TestCase):
         cfg = make_config(provider="banana")
         self.assertEqual(cfg.provider_for("q/q"), "hf")
 
+    def test_prefix_is_case_insensitive_and_trimmed(self):
+        cfg = make_config(provider="auto")
+        self.assertEqual(cfg.provider_for("OPENROUTER:q/q"), "openrouter")
+        self.assertEqual(cfg.provider_for("  openrouter:q/q  "), "openrouter")
+        self.assertEqual(cfg.provider_for("HF:q/q"), "hf")
+        self.assertEqual(cfg.strip_prefix("OPENROUTER:q/q"), "q/q")
+        self.assertEqual(cfg.strip_prefix(" hf:q/q "), "q/q")
+
+    def test_normalize_model_id_preserves_bare_id_case(self):
+        self.assertEqual(Config.normalize_model_id("  Org/Model  "), "Org/Model")
+        self.assertEqual(Config.normalize_model_id("OPENROUTER:Q/Q"), "openrouter:Q/Q")
+        self.assertEqual(Config.normalize_model_id(" hf: q/q "), "hf:q/q")
+
     def test_strip_prefix(self):
         self.assertEqual(Config.strip_prefix("openrouter:a/b"), "a/b")
         self.assertEqual(Config.strip_prefix("hf:a/b"), "a/b")
@@ -62,7 +86,7 @@ class FallbackParsingTests(unittest.TestCase):
         self.assertEqual(len(cfg.fallbacks), 3)
 
 
-class LoadConfigTests(unittest.TestCase):
+class LoadConfigTests(_EnvIsolated):
     def test_env_parsing(self):
         with mock.patch.dict(
             os.environ,
@@ -151,7 +175,8 @@ class LoadConfigTests(unittest.TestCase):
             cfg = load_config()
         self.assertEqual(cfg.ocr_engine, "mistral")
         with mock.patch.dict(os.environ, {"OCR_ENGINE": "wat"}, clear=False):
-            cfg = load_config()
+            with self.assertLogs("look_n_see.config", level="WARNING"):
+                cfg = load_config()
         self.assertEqual(cfg.ocr_engine, "vlm")
 
     def test_mistral_key_loaded(self):
@@ -171,10 +196,11 @@ class TargetPropertyTests(unittest.TestCase):
         )
 
 
-class LoadConfigEdgeTests(unittest.TestCase):
+class LoadConfigEdgeTests(_EnvIsolated):
     def test_invalid_provider_falls_back_to_auto(self):
         with mock.patch.dict(os.environ, {"VISION_PROVIDER": "banana"}, clear=False):
-            cfg = load_config()
+            with self.assertLogs("look_n_see.config", level="WARNING"):
+                cfg = load_config()
         self.assertEqual(cfg.provider, "auto")
 
     def test_bad_float_falls_back_to_default(self):
@@ -319,6 +345,41 @@ class LoadConfigEdgeTests(unittest.TestCase):
     def test_whitespace_padded_int_accepted(self):
         with mock.patch.dict(os.environ, {"VISION_MAX_TOKENS": " 512 "}, clear=False):
             self.assertEqual(load_config().max_tokens, 512)
+
+    def test_deadline_and_url_policy_defaults(self):
+        cfg = load_config()
+        self.assertEqual(cfg.deadline, 100.0)
+        self.assertFalse(cfg.allow_private_urls)
+
+    def test_deadline_and_url_policy_parsed(self):
+        with mock.patch.dict(
+            os.environ,
+            {"VISION_DEADLINE": "12.5", "VISION_ALLOW_PRIVATE_URLS": "1"},
+            clear=False,
+        ):
+            cfg = load_config()
+        self.assertEqual(cfg.deadline, 12.5)
+        self.assertTrue(cfg.allow_private_urls)
+
+    def test_invalid_deadline_falls_back(self):
+        for raw in ("0", "-1", "nan", "slow"):
+            with self.subTest(raw=raw):
+                with mock.patch.dict(
+                    os.environ, {"VISION_DEADLINE": raw}, clear=False
+                ):
+                    self.assertEqual(load_config().deadline, 100.0)
+
+    def test_invalid_engine_and_provider_are_logged(self):
+        with mock.patch.dict(
+            os.environ,
+            {"OCR_ENGINE": "mistrall", "VISION_PROVIDER": "openruter"},
+            clear=False,
+        ):
+            with self.assertLogs("look_n_see.config", level="WARNING") as logs:
+                cfg = load_config()
+        self.assertEqual(cfg.ocr_engine, "vlm")
+        self.assertEqual(cfg.provider, "auto")
+        self.assertEqual(len(logs.records), 2)
 
     def test_config_is_immutable(self):
         cfg = make_config()

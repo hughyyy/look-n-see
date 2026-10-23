@@ -19,8 +19,10 @@ main model can act on.
   (pins the HF transport only).
 - Model ids are provider-routed: `openrouter:<slug>` → OpenRouter,
   `hf:<id>`/bare → HF; `VISION_PROVIDER=openrouter` flips bare ids.
-- Simple retry with backoff on 429/5xx; fallback chain `VISION_FALLBACKS`
-  on hard failure; clear errors otherwise.
+- Simple retry with jittered backoff on 408/425/429/5xx/529 and connection
+  errors (honoring numeric `Retry-After`); fallback chain `VISION_FALLBACKS`
+  on hard failure; one wall-clock `VISION_DEADLINE` budget per tool call;
+  clear errors otherwise.
 
 ### Transport
 - **stdio** only (local MCP client spawns the server as a subprocess).
@@ -42,21 +44,30 @@ main model can act on.
   default budget raised to 2048.
 
 ### Image input
+
 - Accept all three, auto-detected:
   - file path on disk
   - base64 data URI (`data:image/...;base64,...`)
   - `http(s)://` URL
+- Validate inputs: reject non-`image/*` media types, cap decoded bytes at
+  25 MiB, restrict redirects to http(s), refuse private/loopback/link-local URL
+  hosts unless `VISION_ALLOW_PRIVATE_URLS=1`, and redact URL credentials.
 
 ### Tools (specialized set, prompt-driven)
 - `describe_image` — general natural-language description.
 - `analyze_screenshot` — UI/state analysis of a screenshot.
 - `ask_about_image` — Q&A over an image.
 - `extract_text` — OCR: all visible text as `{"text", "engine", ...}` JSON.
-  - Every tool accepts an optional `prompt`/`focus` parameter so the main model
-    can steer toward targeted answers (features, values, specific regions), and
-    an optional `model` parameter for per-call provider/model selection.
-  - `extract_text` additionally accepts `engine` (per-call override of
-    `OCR_ENGINE`).
+- `health` — JSON role/routing/credential report, no network call, always
+  registered (diagnostic surface for the collapse issue).
+- Every tool accepts an optional `prompt`/`focus` parameter so the main model
+  can steer toward targeted answers (features, values, specific regions), and
+  an optional `model` parameter for per-call provider/model selection.
+- `extract_text` additionally accepts `engine` (per-call override of
+  `OCR_ENGINE`).
+- Failures are structured MCP tool errors (`isError: true` with a JSON
+  `{"error": {...}}` body), never prose that looks like an answer; severe
+  degradation flags (empty/refusal/generation payload) add a warning trailer.
 
 ### OCR engines (researched 2026-10 — see `research/ocr-options.md`)
 - `vlm` (default): image + OCR prompt through the existing vision client;
@@ -117,12 +128,11 @@ main model can act on.
   `pyproject.toml` with a console-script entry point; all config via env vars.
 
 ### Verification
-- Offline unit tests (stdlib `unittest`): server starts, tools register, input
-  parsing works, mocked clients. Live check is manual:
-  `scripts/live_smoke.py` with the provider token in the environment.
-- Known issue (2026-10-21): a long-lived server process can degrade over
-  ~tens of calls (canned refusals / non-analyses) — see
-  `VISION_SESSION_COLLAPSE.md`; a fresh process answers correctly.
+- Offline unit tests (stdlib `unittest`, 370 tests, 99% branch coverage):
+  server starts, tools register, input parsing/policy works, mocked clients,
+  deadline/retry/fallback behavior, benchmark harness, scripts.
+  Live check is manual: `scripts/live_smoke.py` (or `--json`) with the provider
+  token in the environment.
 
 ## Stack
 - Python 3.14 (only available toolchain on this workstation)

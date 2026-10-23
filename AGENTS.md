@@ -16,12 +16,21 @@ known issues).
   without updating the dispatcher + `research/ocr-options.md` tradeoffs.
 - Tool-surface variants: `VISION_ENABLED`/`OCR_ENABLED` gate registration at
   startup — the three release variants come from env, not separate packages.
-- Every MCP tool must return structured output the calling model can act on
-  (JSON where it matters, not prose-only).
 - Secrets (HF token, OpenRouter key) come from environment, never hardcoded or
   committed.
 - Config (model id, endpoint URLs, timeouts) via environment variables with
   sane defaults — see the `Config` dataclass in `src/look_n_see/config.py`.
+- Every MCP tool must return structured output the calling model can act on
+  (JSON where it matters, not prose-only). Failures raise `ToolError` with
+  `{"error": {"type": "input|inference|ocr|internal", "exception", "message"}}`
+  so the client sees `isError: true`; never return `"error: ..."` as a result.
+- Image inputs are validated in `images.py`: 25 MiB cap, `image/*` only,
+  http(s)-only redirects, private/loopback hosts refused unless
+  `VISION_ALLOW_PRIVATE_URLS=1`, URL credentials/query strings redacted.
+- Retries/fallbacks share one `VISION_DEADLINE` budget; per-request timeouts
+  derive from the remaining budget. Keep new network calls inside that budget.
+- Output-shape classification lives in `sanity.py` (shared by the server's
+  degradation warning and the benchmark harness); do not duplicate patterns.
 
 ## Workflow
 - Read `BRIEF.md` before starting work.
@@ -35,8 +44,10 @@ known issues).
 ## Verification
 - `python -m compileall` / import smoke test after changes.
 - `python -m unittest discover -s tests -q` — full offline suite (image input
-  parsing, config incl. OCR roles, prompts, transports, retries/fallbacks,
-  OCR engines (mocked httpx), server registration + role gating).
+  parsing/policy, config incl. OCR roles/deadline, prompts, transports,
+  retries/fallbacks/deadline, OCR engines (mocked httpx), benchmark + harness
+  scripts, sanity classification, server registration/structured errors and
+  role gating).
 - MCP server must start and register tools without a live HF call
   (tool registration must not require network); OCR engines other than `vlm`
   must degrade to clear errors when their extra/key is missing.

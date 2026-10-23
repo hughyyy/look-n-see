@@ -184,7 +184,7 @@ class UrlTests(unittest.TestCase):
         fake.read.return_value = b"\xff\xd8\xff\xe0"
         with mock.patch("look_n_see.images._open_url", return_value=fake) as opener:
             media, data = load_image("https://example.com/shot.jpg")
-        opener.assert_called_once_with("https://example.com/shot.jpg", 30.0)
+        opener.assert_called_once_with("https://example.com/shot.jpg", 30.0, False)
         self.assertEqual(media, "image/jpeg")
         self.assertEqual(data, b"\xff\xd8\xff\xe0")
 
@@ -396,51 +396,54 @@ class LocalServerTests(unittest.TestCase):
         return f"http://127.0.0.1:{self.port}{path}"
 
     def test_real_fetch(self):
-        media, data = load_image(self._url("/shot.png"))
+        media, data = load_image(self._url("/shot.png"), allow_private_urls=True)
         self.assertEqual(media, "image/png")
         self.assertEqual(data, _ImageHandler.PNG_BYTES)
 
     def test_uppercase_scheme_accepted(self):
         # RFC 3986: schemes are case-insensitive; the fetcher must not reject
         # "HTTP://..." inputs.
-        media, data = load_image(self._url("/shot.png").replace("http://", "HTTP://"))
+        media, data = load_image(
+            self._url("/shot.png").replace("http://", "HTTP://"),
+            allow_private_urls=True,
+        )
         self.assertEqual(media, "image/png")
         self.assertEqual(data, _ImageHandler.PNG_BYTES)
 
     def test_real_redirect_followed(self):
-        media, data = load_image(self._url("/move.png"))
+        media, data = load_image(self._url("/move.png"), allow_private_urls=True)
         self.assertEqual(media, "image/png")
         self.assertEqual(data, _ImageHandler.PNG_BYTES)
 
     def test_real_http_error_raises(self):
         with self.assertRaises(ImageInputError):
-            load_image(self._url("/missing.png"))
+            load_image(self._url("/missing.png"), allow_private_urls=True)
 
     def test_ftp_redirect_blocked_over_opener(self):
         # The server answers with an ftp:// Location; the real opener's
         # scheme-restricting redirect handler must refuse it end-to-end.
         with self.assertRaises(ImageInputError):
-            load_image(self._url("/ftpmove.png"))
+            load_image(self._url("/ftpmove.png"), allow_private_urls=True)
 
     def test_redirect_loop_raises_image_input_error(self):
         # The stdlib caps redirects; the loop must surface as a tool error, not
         # hang or leak the redirect count.
         with self.assertRaises(ImageInputError):
-            load_image(self._url("/loop.png"))
+            load_image(self._url("/loop.png"), allow_private_urls=True)
 
     def test_file_redirect_blocked_over_opener(self):
         with self.assertRaises(ImageInputError):
-            load_image(self._url("/filemove.png"))
+            load_image(self._url("/filemove.png"), allow_private_urls=True)
 
     def test_empty_body_rejected(self):
         with self.assertRaisesRegex(ImageInputError, "returned no bytes"):
-            load_image(self._url("/empty.png"))
+            load_image(self._url("/empty.png"), allow_private_urls=True)
 
     def test_http_error_leaves_no_resource_warning(self):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", ResourceWarning)
             with self.assertRaises(ImageInputError):
-                load_image(self._url("/missing.png"))
+                load_image(self._url("/missing.png"), allow_private_urls=True)
             gc.collect()
         leaked = [w for w in caught if issubclass(w.category, ResourceWarning)]
         self.assertEqual(leaked, [])
@@ -449,7 +452,7 @@ class LocalServerTests(unittest.TestCase):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", ResourceWarning)
             with self.assertRaises(ImageInputError):
-                load_image(self._url("/ftpmove.png"))
+                load_image(self._url("/ftpmove.png"), allow_private_urls=True)
             gc.collect()
         leaked = [w for w in caught if issubclass(w.category, ResourceWarning)]
         self.assertEqual(leaked, [])
@@ -474,6 +477,97 @@ class InvalidInputTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ImageInputError, "neither an existing file"):
                     load_image(value)
+
+
+class UrlPolicyTests(unittest.TestCase):
+    def test_private_ip_literal_blocked_by_default(self):
+        with self.assertRaisesRegex(ImageInputError, "private address"):
+            load_image("http://127.0.0.1:9/shot.png")
+
+    def test_private_hostname_blocked_by_default(self):
+        with self.assertRaisesRegex(ImageInputError, "private address"):
+            load_image("http://localhost:9/shot.png")
+
+    def test_private_url_query_is_redacted_in_error(self):
+        with self.assertRaises(ImageInputError) as ctx:
+            load_image("http://127.0.0.1:9/shot.png?X-Amz-Signature=SECRET")
+        self.assertNotIn("SECRET", str(ctx.exception))
+        self.assertIn("?***", str(ctx.exception))
+
+    def test_private_allowed_with_opt_in(self):
+        fake = mock.MagicMock()
+        fake.__enter__.return_value = fake
+        fake.headers.get_content_type.return_value = "image/png"
+        fake.read.return_value = b"\x89PNG"
+        url = "http://127.0.0.1:9/shot.png"
+        with mock.patch("look_n_see.images._open_url", return_value=fake) as opener:
+            media, data = load_image(url, allow_private_urls=True)
+        opener.assert_called_once_with(url, 30.0, True)
+        self.assertEqual(media, "image/png")
+        self.assertEqual(data, b"\x89PNG")
+
+    def test_fetch_timeout_is_propagated(self):
+        fake = mock.MagicMock()
+        fake.__enter__.return_value = fake
+        fake.headers.get_content_type.return_value = "image/png"
+        fake.read.return_value = b"\x89PNG"
+        url = "https://example.com/shot.png"
+        with mock.patch("look_n_see.images._open_url", return_value=fake) as opener:
+            load_image(url, timeout=7.5)
+        opener.assert_called_once_with(url, 7.5, False)
+
+    def test_redirect_to_private_address_blocked(self):
+        handler = _HttpOnlyRedirectHandler()
+        req = urllib.request.Request("https://example.com/a.png")
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            handler.redirect_request(
+                req, None, 302, "Found", {}, "http://169.254.169.254/latest/meta-data"
+            )
+        self.assertIn("private address", str(ctx.exception))
+        ctx.exception.close()
+
+    def test_redirect_private_host_allowed_with_opt_in(self):
+        handler = _HttpOnlyRedirectHandler(allow_private=True)
+        req = urllib.request.Request("https://example.com/a.png")
+        # A loopback redirect must be delegated to the stdlib, not refused.
+        try:
+            handler.redirect_request(req, None, 302, "Found", {}, "http://127.0.0.1/x.png")
+        except urllib.error.HTTPError:
+            self.fail("loopback redirect should be followed when opted in")
+
+    def test_query_string_redacted_in_fetch_error(self):
+        with mock.patch("look_n_see.images._open_url", side_effect=OSError("boom")):
+            with self.assertRaises(ImageInputError) as ctx:
+                load_image("https://example.com/a.png?X-Amz-Signature=SECRET")
+        self.assertNotIn("SECRET", str(ctx.exception))
+
+
+class MediaTypeTests(unittest.TestCase):
+    def test_non_image_data_uri_rejected(self):
+        for uri in (
+            "data:text/plain;base64,aGVsbG8=",
+            "data:application/pdf;base64,aGVsbG8=",
+        ):
+            with self.subTest(uri=uri):
+                with self.assertRaisesRegex(ImageInputError, "unsupported media type"):
+                    load_image(uri)
+
+    def test_non_image_file_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "document.pdf"
+            path.write_bytes(b"%PDF-1.4")
+            with self.assertRaisesRegex(ImageInputError, "unsupported media type"):
+                load_image(str(path))
+
+    def test_non_image_url_content_rejected(self):
+        fake = mock.MagicMock()
+        fake.__enter__.return_value = fake
+        fake.headers.get_content_type.return_value = "text/html"
+        fake.read.return_value = b"<html>hi</html>"
+        with mock.patch("look_n_see.images._open_url", return_value=fake):
+            with self.assertRaisesRegex(ImageInputError, "unsupported media type"):
+                load_image("https://example.com/index.html")
+
 
 if __name__ == "__main__":
     unittest.main()

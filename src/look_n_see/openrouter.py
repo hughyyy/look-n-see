@@ -69,11 +69,16 @@ class OpenRouterTransport:
         )
 
     def chat_completion(
-        self, messages: list[dict[str, Any]], model: str, max_tokens: int
+        self,
+        messages: list[dict[str, Any]],
+        model: str,
+        max_tokens: int,
+        timeout: float | None = None,
     ) -> RawResult:
         response = self._http.post(
             "/chat/completions",
             json={"model": model, "messages": messages, "max_tokens": max_tokens},
+            timeout=timeout if timeout is not None else self.config.timeout,
         )
         if response.status_code >= 400:
             raise httpx.HTTPStatusError(
@@ -106,3 +111,7 @@ class OpenRouterTransport:
             finish_reason=choice.get("finish_reason"),
             usage=data.get("usage"),
         )
+
+    def close(self) -> None:
+        """Release the underlying HTTP connection pool."""
+        self._http.close()

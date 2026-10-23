@@ -30,6 +30,22 @@ def _models(default: str) -> tuple[str, ...]:
     return tuple(m.strip() for m in default.replace(",", " ").split() if m.strip())
 
 
+def missing_credentials(models: tuple[str, ...], cfg) -> str | None:
+    """First missing provider credential for the routed model set.
+
+    Routing is per model (prefix/provider), matching VisionClient; a bare id
+    with VISION_PROVIDER=openrouter needs no HF token.
+    """
+    providers = {cfg.provider_for(model) for model in models}
+    if "openrouter" in providers and not cfg.openrouter_api_key:
+        if os.environ.get("OPENROUTER_TOKEN"):
+            return "OPENROUTER_API_KEY (set OPENROUTER_API_KEY, not OPENROUTER_TOKEN)"
+        return "OPENROUTER_API_KEY"
+    if "hf" in providers and not os.environ.get("HF_TOKEN"):
+        return "HF_TOKEN"
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--models", help="comma/space separated model ids (default: VISION_MODEL)")
@@ -53,15 +69,9 @@ def main() -> int:
 
     prompt = SCREENSHOT_DEFAULT if args.prompt == "default" else args.prompt
     models = _models(args.models or cfg.model)
-    if "openrouter" in cfg.provider or any(m.startswith("openrouter:") for m in models):
-        if not cfg.openrouter_api_key:
-            missing_env = "OPENROUTER_API_KEY"
-            if os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_TOKEN"):
-                missing_env = "OPENROUTER_API_KEY (set OPENROUTER_API_KEY, not OPENROUTER_TOKEN)"
-            print(f"error: openrouter models requested but {missing_env} is not set", file=sys.stderr)
-            return 2
-    if any(not m.startswith("openrouter:") for m in models) and not os.environ.get("HF_TOKEN"):
-        print("error: HF models requested but HF_TOKEN is not set", file=sys.stderr)
+    missing = missing_credentials(models, cfg)
+    if missing:
+        print(f"error: model(s) {', '.join(models)} need {missing}", file=sys.stderr)
         return 2
 
     if args.images:
@@ -87,7 +97,7 @@ def main() -> int:
         if args.limit:
             images = images[: args.limit]
     if not images:
-        print("error: no images selected (check --images-directory/--images)", file=sys.stderr)
+        print("error: no images selected (check --images-dir/--images)", file=sys.stderr)
         return 2
 
     spec = BenchmarkSpec(

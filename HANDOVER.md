@@ -20,10 +20,11 @@ and HuggingFace Inference plus optional local/cloud OCR engines.
   the enabled surface): both (default), vision-only (`OCR_ENABLED=0`),
   OCR-only (`VISION_ENABLED=0`).
 
-## Current state (verified 2026-10-22; test suite re-verified 2026-10-23)
+## Current state (verified 2026-10-23)
 
-- **294 tests pass** (`python -m unittest discover -s tests -q`, zero dev deps).
-  Offline only; live behavior unchanged from the 2026-10-22 checks.
+- **370 tests pass** (`python -m unittest discover -s tests -q`, zero dev deps).
+  Offline only; 99% branch coverage (only the two retry-loop exits and the two
+  `__main__` guards are uncovered).
 - Registered with Oh My Pi: `~/.omp/agent/mcp.json` → `look-n-see` (stdio,
   `/mnt/shared/Source/look-n-see/.venv/bin/look-n-see`, editable install of the
   repo, env: `HF_TOKEN`/`OPENROUTER_API_KEY` via `!omp token ...`,
@@ -31,17 +32,45 @@ and HuggingFace Inference plus optional local/cloud OCR engines.
   current source — no config change needed.**
 - Live-verified: vision tools on the default OpenRouter route; `extract_text`
   with the rapidocr engine (local, ~3s) and the vlm engine (OpenRouter);
-  role-gated registrations over stdio handshakes.
-- GitHub: pushed to `github.com/hughyyy/look-n-see` (public, branch `main`,
-  descriptive about field set). Nothing published to PyPI yet.
-- Git history (current HEAD `2f8b862`): `54222ff` (initial server) →
-  `888c164`/`597ca3a`/`9f2e6f1` (OpenRouter provider + fallbacks + error
-  handling) → `8334112` (benchmark harness) → `71fd588`/`f3edca2`
-  (gemma-4-26b default + Qwen/gemma-4-31b fallback chain + HF routing fix) →
-  `90647c4` (rename to look-n-see) → `605e4a0` (vision-collapse incident doc) →
-  `c3b9ac9` (README + brief/implementation/agents sync) → `a153151` (security
-  hardening: input caps, redirect restriction, O_NOFOLLOW writes, mcp>=2) →
-  `36de452` (OCR research memo) → `2f8b862` (OCR implementation).
+  role-gated registrations over stdio handshakes. Mistral OCR remains
+  key-less/untested live.
+- GitHub: pushed to `github.com/hughyyy/look-n-see` (public, branch `main`).
+  Packaging is now implemented in-repo (MIT LICENSE, full metadata, CI +
+  release workflows); nothing published to PyPI yet.
+- Git history through the OCR release: initial server → OpenRouter provider +
+  fallbacks → benchmark harness → gemma-4-26b default → rename → collapse doc →
+  security hardening → OCR research/implementation. The latest review pass
+  (2026-10-23) is the commit carrying the fixes listed below.
+
+## Review pass (2026-10-23)
+
+- **Mistral OCR payload fixed** — images are sent as
+  `{"type": "image_url", "image_url": <data URI>}`, matching the API docs;
+  the previous `document_url` form (and its test) was wrong for images.
+- **Per-call deadline** (`VISION_DEADLINE`, default 100 s) now spans retries and
+  fallbacks; per-request timeouts derive from the remaining budget, and URL
+  fetches use `min(VISION_TIMEOUT, VISION_DEADLINE)` instead of a hardcoded 30 s.
+- **Structured tool errors** — failures raise `ToolError` with a JSON
+  `{"error": {"type", "exception", "message"}}` body and `isError: true`,
+  replacing the old `"error: ..."` prose results.
+- **URL hardening** — non-`image/*` media types rejected; private/loopback/
+  link-local hosts refused unless `VISION_ALLOW_PRIVATE_URLS=1`; query strings
+  redacted alongside userinfo in echoed URLs; redirects are host-checked too.
+- **Model-id normalization** — prefixes are matched case-insensitively and
+  trimmed for per-call ids, not just env config.
+- **Retry policy** — 408/425/529 added, numeric `Retry-After` honored, equal
+  jitter added; failures now carry retry/latency metadata into benchmark rows.
+- **Benchmark harness** — summarize tolerates corrupt rows, `resume=False`
+  truncates instead of doubling, rows/metadata store image paths, p90 is
+  nearest-rank, repetition ignores single-rep pairs, per-model slugs
+  disambiguate collisions, classifier refusal patterns are sentence-anchored.
+- **Lifecycle** — transports/engines close on server shutdown; engine and
+  transport construction locks; HF content normalization matches OpenRouter.
+- **Diagnostics** — new `health` tool (no network) plus a warning trailer on
+  empty/refusal/generation-payload responses; `scripts/live_smoke.py --json`.
+- **Tests** — hermetic config tests (ambient `VISION_*`/`OCR_*` no longer leak
+  in), script tests, sanity tests, plus coverage for every fix above.
+
 
 ## Since the previous handover (initial session → 2026-10-22)
 
@@ -121,27 +150,33 @@ the OMP registration resolves the first two via `omp token <provider>`.
 - `src/look_n_see/ocr.py` — OCR dispatcher + vlm/rapidocr/mistral engines
 - `src/look_n_see/images.py` — file/data-URI/URL → data URI (bounded, http(s)-only redirects)
 - `src/look_n_see/config.py` — env parsing + defaults (incl. OCR roles/engine)
+- `src/look_n_see/sanity.py` — output-shape classifier + degradation annotation
 - `src/look_n_see/benchmark.py` + `scripts/benchmark.py` — benchmark harness
 - `scripts/compare_modes.py`, `scripts/compare_models.py` — vision/OCR
   three-mode and multi-model comparison harnesses (resumable JSONL +
   consensus/local-ref metrics)
 - `research/ocr-options.md` — OCR engine + distribution-pattern research
-- `README.md` (user-facing), `BRIEF.md` (requirements), `IMPLEMENTATION.md` (design + release plan)
 
 ## Known issues / notes
 
 - **Vision session collapse** (2026-10-21, `VISION_SESSION_COLLAPSE.md`): a
   long-lived server process can degrade over ~tens of calls (canned refusals /
   non-analyses). Fresh process recovers immediately — restart OMP (or the
-  stdio process) to recover. Hypotheses in the doc; no fix implemented.
+  stdio process) to recover. Mitigations now shipped: the `health` tool and a
+  warning trailer on empty/refusal/generation-payload responses; automatic
+  client recreation/restart is still not implemented.
 - **`rapidocr-onnxruntime` 1.4.x requires Python <3.13** (PyPI metadata) —
   Python 3.13/3.14 get 1.2.3 via env markers. 1.2.x returns
   `(result, elapse)`; handled in `ocr.py`.
 - **`MISTRAL_API_KEY` is not registered in mcp.json** — `extract_text` with
-  `engine=mistral` errors until the key is added. Default (`vlm`) and
-  `rapidocr` work out of the box.
-- **OMP default MCP timeout is 30s** — registration uses 120s; keep it (the
-  vision route can exceed 30s; rapidocr init needs ~3s first call).
+  `engine=mistral` errors until the key is added. The payload now matches the
+  documented `image_url` form, but the engine is still live-untested.
+- **OMP default MCP timeout is 30s** — registration uses 120s; keep it. The
+  server-side `VISION_DEADLINE` (100s) bounds a call across retries/fallbacks
+  so the client timeout is no longer exceeded by design.
+- `min(VISION_TIMEOUT, VISION_DEADLINE)` bounds URL fetches; the HF transport
+  adjusts its client-level timeout under a lock because `InferenceClient` has
+  no per-call timeout argument.
 - Benchmarks/ outputs (`benchmarks/`) are gitignored, local-only; the data
   contains model outputs over private-project screenshots — don't commit.
 - The MCP client "about"/description: set via `gh repo edit`; README + about
@@ -149,33 +184,29 @@ the OMP registration resolves the first two via `omp token <provider>`.
 
 ## Open items / next steps
 
-- **Release & packaging** (full plan in `IMPLEMENTATION.md`; parity with
-  scrape-n-search): add LICENCE (MIT, pending approval) → pyproject metadata
-  (`readme`, `license`, `[project.urls]`) → `.github/workflows/ci.yml`
-  (unittest, Python 3.10/3.14) → `.github/workflows/release.yml` (test →
-  build → GitHub release → PyPI trusted publishing) → register the PyPI trusted
-  publisher (manual, one-time) → `git tag v0.1.0 && git push origin v0.1.0`,
-  verify `uvx --from 'look-n-see[ocr]' look-n-see`.
+- **Release**: packaging is implemented in-repo (LICENSE, metadata, CI +
+  release workflows; see `IMPLEMENTATION.md`). Remaining external steps:
+  register the PyPI trusted publisher (one-time manual), then
+  `git tag v0.1.0 && git push origin v0.1.0`, and verify
+  `uvx --from 'look-n-see[ocr]' look-n-see` on a clean machine.
 - **Optional B-scripts** (TBD): `look-n-see-vision`/`look-n-see-ocr` console
   scripts that preset the env flags — only if a role must be hard-excluded at
   startup.
 - **Session state** — spec'd in `BRIEF.md` ("Future: session state"), not
   implemented; `client.complete` is the seam.
-- **Vision-collapse follow-ups** (from `VISION_SESSION_COLLAPSE.md`): raw
-  response logging, self-check/auto-restart after N non-conforming responses,
-  a `health` tool.
+- **Vision-collapse follow-ups** — `health` + response flagging are done;
+  still open: raw-response logging and automatic client recreation/restart
+  after N non-conforming responses.
 - **Model-chain reorder (recommended, pending wider validation)** — the
   multi-model comparison measured gemma-4-31b-it at accuracy equal to the
   26b default with 1.6–3× lower latency (vision + vlm-ocr). Candidates after
   a 15–20 image confirmation run: `VISION_MODEL=openrouter:google/gemma-4-31b-it`
   with 26b as first fallback. qwen3-vl-30b not recommended for the chain
   (fabrication); gpt-4o-mini not recommended for OCR (coverage).
-- **Extended live testing (partially done)** — comparison runs exercised all
-  three OCR engines live (vlm/rapidocr via scripts; mistral still untested
-  key-wise). Remaining: drive the mounted tools through the registered server
-  after an OMP restart, and optionally add `MISTRAL_API_KEY` to mcp.json.
-
-## Note
+- **Extended live testing (partially done)** — vlm/rapidocr exercised live;
+  mistral still untested key-wise. Remaining: drive the mounted tools through
+  the registered server after an OMP restart, and optionally add
+  `MISTRAL_API_KEY` to mcp.json.
 
 The collapse-incident reproduction and the benchmark sweep are documented
 outputs of previous sessions — keep the JSONL/data local (gitignored), and

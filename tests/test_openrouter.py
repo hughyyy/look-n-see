@@ -218,5 +218,13 @@ class MalformedResponseTests(unittest.TestCase):
         self.assertEqual(result.text, "")
 
 
+class LifecycleTests(unittest.TestCase):
+    def test_close_closes_http_client(self):
+        transport = OpenRouterTransport(make_config())
+        with mock.patch.object(transport._http, "close") as close:
+            transport.close()
+        close.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

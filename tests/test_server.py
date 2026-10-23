@@ -30,6 +30,8 @@ CFG = Config(
     timeout=5.0,
     retries=0,
     retry_backoff=1.0,
+    # Tool-level URL tests use a loopback image server.
+    allow_private_urls=True,
 )
 
 
@@ -53,22 +55,47 @@ def call(mcp, name, arguments):
     return result.content[0].text
 
 
+def call_failure(mcp, name, arguments):
+    """Invoke a tool expected to fail and return its structured ToolError."""
+    try:
+        asyncio.run(mcp.call_tool(name, arguments))
+    except ToolError as exc:
+        return exc
+    raise AssertionError(f"{name} was expected to raise ToolError")
+
+
+def error_payload(exc: ToolError) -> dict:
+    """Parse the JSON envelope out of a ToolError message.
+
+    MCPServer prefixes the tool name ("Error executing tool X: {...}"), so the
+    envelope starts at the first brace.
+    """
+    text = str(exc)
+    return json.loads(text[text.index("{"):])
+
+
 def tool_names(mcp) -> set[str]:
     return {t.name for t in asyncio.run(mcp.list_tools())}
 
 
 VISION_TOOLS = {"describe_image", "analyze_screenshot", "ask_about_image"}
+HEALTH_TOOL = {"health"}
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-async def _stdio_probe(overrides: dict[str, str]) -> tuple[set[str], str]:
+async def _stdio_probe(overrides: dict[str, str]) -> tuple[set[str], bool, str]:
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("VISION_", "OCR_", "OPENROUTER_", "HF_", "MISTRAL_"))
+    }
     params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "look_n_see"],
         env={
-            **os.environ,
+            **env,
             "VISION_ENABLED": "1",
             "OCR_ENABLED": "1",
             **overrides,
@@ -81,19 +108,21 @@ async def _stdio_probe(overrides: dict[str, str]) -> tuple[set[str], str]:
             listed = await session.list_tools()
             names = {tool.name for tool in listed.tools}
             # Exercise one tool end-to-end; an unreadable path fails offline
-            # before any provider call. A variant with no tools has nothing to
-            # invoke.
-            if not names:
-                return names, ""
-            tool = "describe_image" if "describe_image" in names else "extract_text"
-            result = await session.call_tool(tool, {"image": "/no/such/file.png"})
-            return names, result.content[0].text
+            # before any provider call. The health-only variant needs no args.
+            if "describe_image" in names:
+                tool, arguments = "describe_image", {"image": "/no/such/file.png"}
+            elif "extract_text" in names:
+                tool, arguments = "extract_text", {"image": "/no/such/file.png"}
+            else:
+                tool, arguments = "health", {}
+            result = await session.call_tool(tool, arguments)
+            return names, result.is_error, result.content[0].text
 
 
-def stdio_surfaces() -> dict[str, tuple[set[str], str]]:
+def stdio_surfaces() -> dict[str, tuple[set[str], bool, str]]:
     """Spawn one server per release variant (concurrently) over stdio."""
 
-    async def _run() -> dict[str, tuple[set[str], str]]:
+    async def _run() -> dict[str, tuple[set[str], bool, str]]:
         both, vision, ocr, none = await asyncio.gather(
             _stdio_probe({}),
             _stdio_probe({"OCR_ENABLED": "0"}),
@@ -108,24 +137,24 @@ def stdio_surfaces() -> dict[str, tuple[set[str], str]]:
 class RegistrationTests(unittest.TestCase):
     def test_registers_all_tools_by_default(self):
         mcp = create_server(cfg=CFG, client=FakeClient())
-        self.assertEqual(tool_names(mcp), VISION_TOOLS | {"extract_text"})
+        self.assertEqual(tool_names(mcp), VISION_TOOLS | {"extract_text", "health"})
 
     def test_ocr_disabled_registers_vision_only(self):
         mcp = create_server(cfg=Config(**{**CFG.__dict__, "ocr_enabled": False}), client=FakeClient())
-        self.assertEqual(tool_names(mcp), VISION_TOOLS)
+        self.assertEqual(tool_names(mcp), VISION_TOOLS | HEALTH_TOOL)
 
     def test_vision_disabled_registers_ocr_only(self):
         mcp = create_server(
             cfg=Config(**{**CFG.__dict__, "vision_enabled": False}), client=FakeClient()
         )
-        self.assertEqual(tool_names(mcp), {"extract_text"})
+        self.assertEqual(tool_names(mcp), {"extract_text"} | HEALTH_TOOL)
 
-    def test_no_tools_when_everything_disabled(self):
+    def test_health_only_when_everything_disabled(self):
         mcp = create_server(
             cfg=Config(**{**CFG.__dict__, "vision_enabled": False, "ocr_enabled": False}),
             client=FakeClient(),
         )
-        self.assertEqual(tool_names(mcp), set())
+        self.assertEqual(tool_names(mcp), HEALTH_TOOL)
 
     def test_defaults_construct_from_env_and_shared_client(self):
         # The no-argument path (as used by main()) loads env config and
@@ -134,7 +163,7 @@ class RegistrationTests(unittest.TestCase):
             "look_n_see.server.VisionClient", return_value=FakeClient(result="ok")
         ) as vc:
             mcp = create_server()
-        self.assertEqual(tool_names(mcp), VISION_TOOLS | {"extract_text"})
+        self.assertEqual(tool_names(mcp), VISION_TOOLS | {"extract_text", "health"})
         vc.assert_called_once_with(CFG)
 
     def test_main_runs_stdio_server(self):
@@ -176,25 +205,65 @@ class RegistrationTests(unittest.TestCase):
         vision_client.assert_called_once_with(CFG)
 
 
+class LifecycleTests(unittest.TestCase):
+    def test_lifespan_closes_owned_resources(self):
+        from look_n_see import server as server_mod
+
+        ocr = mock.Mock()
+        client = mock.Mock()
+        lifespan = server_mod._make_lifespan(ocr, client, owns_client=True)
+
+        async def run():
+            async with lifespan(None):
+                pass
+
+        asyncio.run(run())
+        ocr.close.assert_called_once()
+        client.close.assert_called_once()
+
+    def test_lifespan_leaves_injected_client_open(self):
+        from look_n_see import server as server_mod
+
+        ocr = mock.Mock()
+        client = mock.Mock()
+        lifespan = server_mod._make_lifespan(ocr, client, owns_client=False)
+
+        async def run():
+            async with lifespan(None):
+                pass
+
+        asyncio.run(run())
+        ocr.close.assert_called_once()
+        client.close.assert_not_called()
+
+
 class StdioHandshakeTests(unittest.TestCase):
     """End-to-end registration over the real stdio transport: a spawned
     server process must advertise exactly the variant's tool surface."""
 
     def test_variants_advertise_surface_and_serve_tools(self):
         expected = {
-            "both": VISION_TOOLS | {"extract_text"},
-            "vision": VISION_TOOLS,
-            "ocr": {"extract_text"},
-            "none": set(),
+            "both": VISION_TOOLS | {"extract_text", "health"},
+            "vision": VISION_TOOLS | HEALTH_TOOL,
+            "ocr": {"extract_text", "health"},
+            "none": HEALTH_TOOL,
         }
-        for variant, (names, error_text) in stdio_surfaces().items():
+        for variant, (names, is_error, text) in stdio_surfaces().items():
             with self.subTest(variant=variant):
                 self.assertEqual(names, expected[variant])
-                if names:
-                    self.assertTrue(error_text.startswith("error:"), error_text)
-                    self.assertIn("image input", error_text)
+                if names & (VISION_TOOLS | {"extract_text"}):
+                    # Unreadable input fails offline, before any provider call,
+                    # and must be reported as a structured MCP tool error.
+                    self.assertTrue(is_error, text)
+                    payload = json.loads(text[text.index("{"):])
+                    self.assertEqual(payload["error"]["type"], "input")
+                    self.assertIn("image input", payload["error"]["message"])
                 else:
-                    self.assertEqual(error_text, "")
+                    self.assertFalse(is_error)
+                    payload = json.loads(text)
+                    self.assertTrue(payload["ok"])
+                    self.assertFalse(payload["vision_enabled"])
+                    self.assertFalse(payload["ocr_enabled"])
 
 
 class ToolSchemaTests(unittest.TestCase):
@@ -291,36 +360,71 @@ class ToolBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(fake.kwargs[0]["model"], "openrouter:google/gemma-4-26b-a4b-it:free")
 
-    def test_invalid_image_returns_error_text(self):
+    def test_invalid_image_returns_structured_error(self):
         fake = FakeClient()
         mcp = create_server(cfg=CFG, client=fake)
-        result = call(mcp, "describe_image", {"image": "/no/such/file.png"})
-        self.assertTrue(result.startswith("error:"))
+        error = call_failure(mcp, "describe_image", {"image": "/no/such/file.png"})
+        payload = error_payload(error)
+        self.assertEqual(payload["error"]["type"], "input")
+        self.assertEqual(payload["error"]["exception"], "ImageInputError")
+        self.assertIn("image input", payload["error"]["message"])
         self.assertEqual(fake.calls, [])
 
-    def test_inference_failure_returns_error_text(self):
+    def test_inference_failure_returns_structured_error(self):
         fake = FakeClient(error=RuntimeError("boom"))
         mcp = create_server(cfg=CFG, client=fake)
-        result = call(mcp, "describe_image", {"image": PNG_DATA_URI})
-        self.assertTrue(result.startswith("error:"))
+        error = call_failure(mcp, "describe_image", {"image": PNG_DATA_URI})
+        payload = error_payload(error)
+        self.assertEqual(payload["error"]["type"], "inference")
+        self.assertEqual(payload["error"]["message"], "boom")
 
-    def test_empty_image_string_returns_error_text(self):
+    def test_empty_image_string_returns_structured_error(self):
         fake = FakeClient()
         mcp = create_server(cfg=CFG, client=fake)
-        result = call(mcp, "describe_image", {"image": "  "})
-        self.assertTrue(result.startswith("error:"))
+        error = call_failure(mcp, "describe_image", {"image": "  "})
+        self.assertEqual(error_payload(error)["error"]["type"], "input")
         self.assertEqual(fake.calls, [])
 
-    def test_unexpected_input_error_surfaces_as_tool_error(self):
-        # Only ImageInputError is converted to an "error:" result; anything
-        # else is a programming fault and surfaces as an MCP ToolError.
+    def test_unexpected_input_error_surfaces_as_structured_error(self):
+        # A non-ImageInputError from conversion is still a structured failure,
+        # tagged `internal`, not a bare "error:" string.
         fake = FakeClient()
         mcp = create_server(cfg=CFG, client=fake)
         with mock.patch("look_n_see.server.to_data_uri", side_effect=ValueError("boom")):
-            with self.assertRaises(ToolError) as ctx:
-                asyncio.run(mcp.call_tool("describe_image", {"image": PNG_DATA_URI}))
-        self.assertIn("boom", str(ctx.exception))
+            error = call_failure(mcp, "describe_image", {"image": PNG_DATA_URI})
+        payload = error_payload(error)
+        self.assertEqual(payload["error"]["type"], "internal")
+        self.assertIn("boom", payload["error"]["message"])
         self.assertEqual(fake.calls, [])
+
+    def test_refusal_response_is_annotated(self):
+        fake = FakeClient(result="I am a text-based AI and cannot fulfill this request.")
+        mcp = create_server(cfg=CFG, client=fake)
+        result = call(mcp, "describe_image", {"image": PNG_DATA_URI})
+        self.assertIn("I am a text-based AI", result)
+        self.assertIn("[look-n-see warning: response flagged as refusal", result)
+
+    def test_empty_response_is_annotated(self):
+        fake = FakeClient(result="")
+        mcp = create_server(cfg=CFG, client=fake)
+        result = call(mcp, "describe_image", {"image": PNG_DATA_URI})
+        self.assertIn("[look-n-see warning: response flagged as empty", result)
+
+    def test_normal_response_is_not_annotated(self):
+        fake = FakeClient(result="A dark mask covers the pane with a Wait message chip.")
+        mcp = create_server(cfg=CFG, client=fake)
+        result = call(mcp, "describe_image", {"image": PNG_DATA_URI})
+        self.assertEqual(result, "A dark mask covers the pane with a Wait message chip.")
+
+    def test_health_reports_roles_without_network(self):
+        mcp = create_server(cfg=CFG, client=FakeClient())
+        payload = json.loads(call(mcp, "health", {}))
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["vision_enabled"])
+        self.assertTrue(payload["ocr_enabled"])
+        self.assertEqual(payload["model"], "test-model")
+        self.assertEqual(payload["ocr_engine"], "vlm")
+        self.assertIn("credentials", payload)
 
 
 class OcrToolTests(unittest.TestCase):
@@ -352,15 +456,21 @@ class OcrToolTests(unittest.TestCase):
     def test_extract_text_engine_override_unknown(self):
         fake = FakeClient(result="ok")
         mcp = create_server(cfg=CFG, client=fake)
-        result = call(mcp, "extract_text", {"image": PNG_DATA_URI, "engine": "bogus"})
-        self.assertIn("unknown OCR engine", result)
+        error = call_failure(mcp, "extract_text", {"image": PNG_DATA_URI, "engine": "bogus"})
+        payload = error_payload(error)
+        self.assertEqual(payload["error"]["type"], "ocr")
+        self.assertIn("unknown OCR engine", payload["error"]["message"])
 
     def test_extract_text_engine_override_rapidocr_error_when_unavailable(self):
         fake = FakeClient(result="ok")
         mcp = create_server(cfg=CFG, client=fake)
         with mock.patch("look_n_see.ocr._RAPIDOCR_AVAILABLE", False):
-            result = call(mcp, "extract_text", {"image": PNG_DATA_URI, "engine": "rapidocr"})
-        self.assertIn("requires the 'ocr' extra", result)
+            error = call_failure(
+                mcp, "extract_text", {"image": PNG_DATA_URI, "engine": "rapidocr"}
+            )
+        payload = error_payload(error)
+        self.assertEqual(payload["error"]["type"], "ocr")
+        self.assertIn("requires the 'ocr' extra", payload["error"]["message"])
 
     def test_extract_text_rapidocr_success(self):
         engine = mock.Mock()
@@ -392,20 +502,46 @@ class OcrToolTests(unittest.TestCase):
     def test_extract_text_mistral_requires_key(self):
         fake = FakeClient(result="ok")
         mcp = create_server(cfg=CFG, client=fake)
-        result = call(mcp, "extract_text", {"image": PNG_DATA_URI, "engine": "mistral"})
-        self.assertIn("MISTRAL_API_KEY", result)
+        error = call_failure(
+            mcp, "extract_text", {"image": PNG_DATA_URI, "engine": "mistral"}
+        )
+        payload = error_payload(error)
+        self.assertEqual(payload["error"]["type"], "ocr")
+        self.assertIn("MISTRAL_API_KEY", payload["error"]["message"])
 
     def test_extract_text_invalid_image(self):
         fake = FakeClient(result="ok")
         mcp = create_server(cfg=CFG, client=fake)
-        result = call(mcp, "extract_text", {"image": "/no/such/file.png"})
-        self.assertTrue(result.startswith("error:"))
+        error = call_failure(mcp, "extract_text", {"image": "/no/such/file.png"})
+        self.assertEqual(error_payload(error)["error"]["type"], "input")
 
-    def test_extract_text_unexpected_error_returns_error_text(self):
+    def test_extract_text_unexpected_error_returns_structured_error(self):
         mcp = create_server(cfg=CFG, client=FakeClient())
         with mock.patch("look_n_see.server.to_data_uri", side_effect=ValueError("boom")):
-            result = call(mcp, "extract_text", {"image": PNG_DATA_URI})
-        self.assertEqual(result, "error: boom")
+            error = call_failure(mcp, "extract_text", {"image": PNG_DATA_URI})
+        payload = error_payload(error)
+        self.assertEqual(payload["error"]["type"], "internal")
+        self.assertIn("boom", payload["error"]["message"])
+
+    def test_extract_text_inference_failure_is_inference_error(self):
+        from look_n_see.client import InferenceError
+
+        fake = FakeClient(error=InferenceError("provider down"))
+        mcp = create_server(cfg=CFG, client=fake)
+        error = call_failure(mcp, "extract_text", {"image": PNG_DATA_URI})
+        payload = error_payload(error)
+        self.assertEqual(payload["error"]["type"], "inference")
+        self.assertIn("provider down", payload["error"]["message"])
+
+    def test_extract_text_unexpected_engine_error_is_internal(self):
+        mcp = create_server(cfg=CFG, client=FakeClient())
+        with mock.patch(
+            "look_n_see.server.OcrDispatcher.extract", side_effect=ValueError("boom")
+        ):
+            error = call_failure(mcp, "extract_text", {"image": PNG_DATA_URI})
+        payload = error_payload(error)
+        self.assertEqual(payload["error"]["type"], "internal")
+        self.assertIn("boom", payload["error"]["message"])
 
 
 class _UrlToolHandler(http.server.BaseHTTPRequestHandler):
@@ -464,18 +600,36 @@ class UrlInputToolTests(unittest.TestCase):
         self.assertIn('"engine": "vlm"', result)
         self.assertIn("HELLO", result)
 
-    def test_unreachable_url_returns_error_text(self):
+    def test_unreachable_url_returns_structured_error(self):
         fake = FakeClient()
         mcp = create_server(cfg=CFG, client=fake)
         # Port 1 (tcpmux) has nothing listening; connection refused.
-        result = call(mcp, "describe_image", {"image": "http://127.0.0.1:1/nope.png"})
-        self.assertTrue(result.startswith("error:"))
+        error = call_failure(
+            mcp, "describe_image", {"image": "http://127.0.0.1:1/nope.png"}
+        )
+        payload = error_payload(error)
+        self.assertEqual(payload["error"]["type"], "input")
+        self.assertIn("failed to fetch image URL", payload["error"]["message"])
 
-    def test_url_404_returns_error_text(self):
+    def test_url_404_returns_structured_error(self):
         fake = FakeClient()
         mcp = create_server(cfg=CFG, client=fake)
-        result = call(mcp, "describe_image", {"image": f"http://127.0.0.1:{self.port}/gone.png"})
-        self.assertTrue(result.startswith("error:"))
+        error = call_failure(
+            mcp, "describe_image", {"image": f"http://127.0.0.1:{self.port}/gone.png"}
+        )
+        self.assertEqual(error_payload(error)["error"]["type"], "input")
+
+    def test_private_url_refused_without_opt_in(self):
+        cfg = Config(**{**CFG.__dict__, "allow_private_urls": False})
+        fake = FakeClient()
+        mcp = create_server(cfg=cfg, client=fake)
+        error = call_failure(
+            mcp, "describe_image", {"image": f"http://127.0.0.1:{self.port}/shot.png"}
+        )
+        payload = error_payload(error)
+        self.assertEqual(payload["error"]["type"], "input")
+        self.assertIn("private address", payload["error"]["message"])
+        self.assertEqual(fake.calls, [])
 
 
 class ModuleEntryTests(unittest.TestCase):

@@ -2,22 +2,27 @@
 
 Layout of a run directory (default `benchmarks/run-<timestamp>/`):
 
-    run.json            metadata: models, images, prompt, config, versions
+    run.json            metadata: models, images (names + paths), prompt, config
     results.jsonl       one JSON object per call, streaming-appended
     by-model/<slug>.jsonl  per-model views of the same rows
     summary.json        per-model stats + flagged-call samples (summarize())
     analysis_prompt.md  ready-to-hand prompt for an evaluation agent
 
-`run_benchmark` is resumable: existing (model, image, rep) keys are skipped.
+`run_benchmark` is resumable: existing (model, image path, rep) keys are
+skipped. Corrupt or truncated JSONL rows are ignored by both resume and
+summarize, so a killed run stays analyzable.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import re
 import statistics
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,41 +30,14 @@ from pathlib import Path
 from .client import Completion, InferenceError, VisionClient
 from .images import ImageInputError, to_data_uri
 from .prompts import SCREENSHOT_DEFAULT, build_messages
+from .sanity import classify
 
-# --- output-shape classifiers (port of the vision-collapse investigation) -----
-
-REFUSAL_PATTERNS = [
-    "text-based ai",
-    "do not have the capability",
-    "cannot fulfill",
-    "unable to",
-    "as an ai",
-    "i cannot",
-    "i don't have the ability",
-    "largely obscured or clipped",
-    "cannot generate, render, or export",
-    "i am an ai language model",
+__all__ = [
+    "BenchmarkSpec",
+    "classify",
+    "run_benchmark",
+    "summarize",
 ]
-GEN_PAYLOAD_PATTERNS = ["dalle", "text2im", '"model": "dall', "generate an image", "generate, render, or export"]
-JSON_MARKER_RE = re.compile(r'"point"\s*:|"label"\s*:|"x"\s*:\s*["\d-]|"y"\s*:\s*["\d-]')
-
-
-def classify(text: str) -> list[str]:
-    low = (text or "").lower()
-    flags: list[str] = []
-    if not text or not text.strip():
-        flags.append("empty")
-    if any(p in low for p in REFUSAL_PATTERNS):
-        flags.append("refusal")
-    if any(p in low for p in GEN_PAYLOAD_PATTERNS):
-        flags.append("gen_payload")
-    if JSON_MARKER_RE.search(text) or text.lstrip().startswith(("{", "[")):
-        flags.append("json_markers")
-    if len(text.strip()) < 60 and not flags:
-        flags.append("terse")
-    if not flags:
-        flags.append("normal")
-    return flags
 
 
 @dataclass(frozen=True)
@@ -73,6 +51,37 @@ class BenchmarkSpec:
 
 def _slug(model_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", ".", model_id)
+
+
+def _unique_slugs(model_ids: list[str]) -> dict[str, str]:
+    """Filesystem-safe per-model names; disambiguate collisions with a hash."""
+    base = {model_id: _slug(model_id) for model_id in model_ids}
+    counts = Counter(base.values())
+    return {
+        model_id: (
+            base[model_id]
+            if counts[base[model_id]] == 1
+            else f"{base[model_id]}.{hashlib.sha256(model_id.encode()).hexdigest()[:8]}"
+        )
+        for model_id in model_ids
+    }
+
+
+def _read_rows(path: Path) -> list[dict]:
+    """Parse a JSONL file, skipping corrupt or non-object rows."""
+    if not path.exists():
+        return []
+    rows: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
 
 
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
@@ -112,6 +121,8 @@ def run_benchmark(
     Returns the run directory. `client` must expose `complete_with_meta(
     messages, model=...)`; benchmark calls pass `fallbacks=()` so every row
     is attributed to the requested model, never a silent fallback.
+    `resume=False` truncates an existing results file before running so a
+    rerun cannot double-count rows.
     """
     out_dir = Path(spec.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -119,6 +130,7 @@ def run_benchmark(
         "created": datetime.now(timezone.utc).isoformat(),
         "models": list(spec.models),
         "images": [os.path.basename(p) for p in spec.images],
+        "image_paths": [os.path.abspath(p) for p in spec.images],
         "reps": spec.reps,
         "prompt": spec.prompt,
         "python": sys.version.split()[0],
@@ -132,6 +144,7 @@ def run_benchmark(
             "max_tokens": client.config.max_tokens,
             "timeout": client.config.timeout,
             "retries": client.config.retries,
+            "deadline": client.config.deadline,
         },
     }
     run_file = out_dir / "run.json"
@@ -142,14 +155,19 @@ def run_benchmark(
         pass  # resuming an existing run keeps its original metadata
 
     results_file = out_dir / "results.jsonl"
+    if not resume and results_file.exists():
+        with _open_nofollow(results_file, "w"):
+            pass  # truncate: a no-resume rerun starts from a clean results file
+
     done: set[tuple[str, str, int]] = set()
-    if resume and results_file.exists():
-        for line in results_file.read_text(encoding="utf-8").splitlines():
+    if resume:
+        for row in _read_rows(results_file):
             try:
-                row = json.loads(line)
-                done.add((row["model"], row["image"], row["rep"]))
-            except (json.JSONDecodeError, KeyError, TypeError):
-                # Truncated or hand-edited rows are skipped, never fatal.
+                path = row["path"]
+                done.add((row["model"], path, row["rep"]))
+            except (KeyError, TypeError):
+                # Legacy (path-less) or hand-edited rows are never trusted
+                # as completed work.
                 continue
 
     if progress:
@@ -167,10 +185,10 @@ def run_benchmark(
                 continue
             messages = build_messages(uri, spec.prompt, spec.prompt)
             for rep in range(1, spec.reps + 1):
-                if (model_id, image_name, rep) in done:
+                if (model_id, image_path, rep) in done:
                     continue
                 row = _call_row(
-                    model_id, image_name, rep, spec.prompt, messages, client
+                    model_id, image_name, rep, spec.prompt, messages, client, image_path
                 )
                 _write_row(results_file, row)
                 total += 1
@@ -197,10 +215,12 @@ def _call_row(
     prompt: str,
     messages: list[dict],
     client: VisionClient,
+    image_path: str | None = None,
 ) -> dict:
     row: dict = {
         "model": model_id,
         "image": image_name,
+        "path": image_path or image_name,
         "rep": rep,
         "prompt": prompt,
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -220,7 +240,12 @@ def _call_row(
             usage=completion.usage,
         )
     except InferenceError as exc:
-        row.update(ok=False, error=str(exc), retries=0)
+        row.update(
+            ok=False,
+            error=str(exc),
+            retries=getattr(exc, "retries", 0),
+            latency_s=getattr(exc, "latency_s", None),
+        )
     except Exception as exc:  # noqa: BLE001 - recorded, not fatal
         row.update(ok=False, error=f"{exc.__class__.__name__}: {exc}", retries=0)
     row["flags"] = classify(row.get("text") or "") if row.get("ok") else [
@@ -233,11 +258,7 @@ def summarize(out_dir: str | Path, *, write_files: bool = True) -> dict:
     """Per-model stats + flagged samples; writes summary.json and by-model/*.jsonl."""
     out_dir = Path(out_dir)
     run_meta = json.loads((out_dir / "run.json").read_text(encoding="utf-8"))
-    rows = [
-        json.loads(line)
-        for line in (out_dir / "results.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    rows = _read_rows(out_dir / "results.jsonl")
     by_model: dict[str, list[dict]] = {}
     for row in rows:
         by_model.setdefault(row["model"], []).append(row)
@@ -259,6 +280,7 @@ def summarize(out_dir: str | Path, *, write_files: bool = True) -> dict:
         flagged = [
             {
                 "image": r["image"],
+                "path": r.get("path", r["image"]),
                 "rep": r["rep"],
                 "flags": r["flags"],
                 "snippet": (r.get("text") or r.get("error") or "")[:200],
@@ -287,8 +309,9 @@ def summarize(out_dir: str | Path, *, write_files: bool = True) -> dict:
     if write_files:
         by_model_dir = out_dir / "by-model"
         by_model_dir.mkdir(exist_ok=True)
+        slugs = _unique_slugs(list(by_model))
         for model_id, model_rows in by_model.items():
-            with _open_nofollow(by_model_dir / f"{_slug(model_id)}.jsonl", "w") as fh:
+            with _open_nofollow(by_model_dir / f"{slugs[model_id]}.jsonl", "w") as fh:
                 for r in model_rows:
                     fh.write(json.dumps(r) + "\n")
         with _open_nofollow(out_dir / "summary.json", "w") as fh:
@@ -299,15 +322,21 @@ def summarize(out_dir: str | Path, *, write_files: bool = True) -> dict:
 
 
 def _repetition_rate(model_rows: list[dict]) -> float | None:
-    """Share of (model, image) pairs whose N reps are byte-identical."""
+    """Share of (model, image) pairs whose N>1 reps are byte-identical.
+
+    Pairs with a single successful rep carry no repetition signal and are
+    excluded; `None` means the run cannot measure repetition at all.
+    """
     pairs: dict[tuple, list[str]] = {}
     for r in model_rows:
         if r.get("ok"):
-            pairs.setdefault((r["model"], r["image"]), []).append(r["text"])
-    if not pairs:
+            key = (r["model"], r.get("path") or r["image"])
+            pairs.setdefault(key, []).append(r["text"])
+    comparable = [texts for texts in pairs.values() if len(texts) > 1]
+    if not comparable:
         return None
-    identical = sum(1 for texts in pairs.values() if len(texts) > 1 and len(set(texts)) == 1)
-    return identical / len(pairs)
+    identical = sum(1 for texts in comparable if len(set(texts)) == 1)
+    return identical / len(comparable)
 
 
 def _quantiles(values: list[float]) -> dict[str, float]:
@@ -315,8 +344,11 @@ def _quantiles(values: list[float]) -> dict[str, float]:
     n = len(values)
     if n == 1:
         return {"min": values[0], "median": values[0], "p90": values[0], "max": values[0]}
+
     def pct(p: float) -> float:
-        return values[min(n - 1, int(p * n))]
+        # Nearest-rank percentile: the smallest value with rank >= ceil(p*n).
+        return values[min(n - 1, max(0, math.ceil(p * n) - 1))]
+
     return {
         "min": round(values[0], 2),
         "median": round(statistics.median(values), 2),
@@ -345,6 +377,7 @@ analyses. Data is in the run directory:
 ## Data layout
 
 - `__OUT__/run.json` — metadata: models, images, prompts, configs, versions.
+  `images` holds basenames; `image_paths` holds the source paths.
 - `__OUT__/summary.json` — per-model stats: call success, latency, token
   usage, output-quality flags (refusal / json-marker dumps / gen-payloads /
   terse / empty), flagged samples, and repetition rate across reps.
@@ -353,8 +386,8 @@ analyses. Data is in the run directory:
 - Images are UI screenshots of PrimeVue-style components whose filenames
   indicate the component (e.g. `data-00-datatable-paginator.png`).
 
-Images may be inspected directly at their paths in run.json if you have
-image-reading tools.
+Images may be inspected directly at the paths listed in `run.json`'s
+`image_paths` if you have image-reading tools.
 
 ## Ground rules
 

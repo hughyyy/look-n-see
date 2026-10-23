@@ -13,6 +13,7 @@ from look_n_see.client import (
     VisionClient,
     _describe_error,
     _is_retryable,
+    _retry_after_seconds,
 )
 from look_n_see.config import Config
 from look_n_see.openrouter import OpenRouterTransport, RawResult
@@ -37,9 +38,11 @@ class FakeTransport:
     def __init__(self, behavior):
         self.behavior = behavior  # list of RawResult | Exception, replayed per call
         self.calls: list[tuple[list, str, int]] = []
+        self.timeouts: list[float | None] = []
 
-    def chat_completion(self, messages, model, max_tokens):
+    def chat_completion(self, messages, model, max_tokens, timeout=None):
         self.calls.append((messages, model, max_tokens))
+        self.timeouts.append(timeout)
         if self.behavior:
             item = self.behavior.pop(0)
             if isinstance(item, Exception):
@@ -79,6 +82,18 @@ class FallbackChainTests(unittest.TestCase):
         self.assertEqual(result, "ok")
         models_called = [c[1] for c in fake.calls]
         self.assertEqual(models_called, ["prim", "fb"])
+
+    def test_model_id_is_normalized_before_routing(self):
+        # Case-insensitive prefix + surrounding whitespace, bare id unchanged.
+        client = VisionClient(make_config())
+        fake = FakeTransport([])
+        attach(fake, client)
+        result = client.complete_with_meta(
+            [{"role": "user"}], model="  OPENROUTER:q/q  "
+        )
+        self.assertEqual(fake.calls[0][1], "q/q")
+        self.assertEqual(result.provider, "openrouter")
+        self.assertEqual(result.model, "openrouter:q/q")
 
     def test_all_fail_reports_chain(self):
         cfg = make_config(fallbacks=("fb",))
@@ -145,7 +160,7 @@ class FallbackChainTests(unittest.TestCase):
         cfg = make_config(model="openrouter:q/q", fallbacks=("hf:fb",))
         client = VisionClient(cfg)
         calls = []
-        client._hf.chat_completion = lambda messages, model, max_tokens: (
+        client._hf.chat_completion = lambda messages, model, max_tokens, timeout=None: (
             calls.append(model) or RawResult(text="hf ok")
         )
         self.assertEqual(client.complete([{"role": "user"}]), "hf ok")
@@ -206,6 +221,53 @@ class FallbackChainTests(unittest.TestCase):
             self.assertEqual(client.complete([{"role": "user"}]), "or ok")
         self.assertEqual(post.call_args.kwargs["json"]["model"], "q/q")
 
+    def test_no_deadline_when_disabled(self):
+        cfg = make_config(timeout=7.0, deadline=0)
+        client = VisionClient(cfg)
+        fake = FakeTransport([])
+        attach(fake, client)
+        client.complete([{"role": "user"}], model="prim")
+        self.assertEqual(fake.timeouts[0], 7.0)
+
+    def test_retry_after_non_numeric_header_ignored(self):
+        request = httpx.Request("POST", "https://x")
+        response = httpx.Response(
+            429, headers={"Retry-After": "later"}, request=request
+        )
+        exc = httpx.HTTPStatusError("err", request=request, response=response)
+        self.assertIsNone(_retry_after_seconds(exc))
+        self.assertIsNone(_retry_after_seconds(RuntimeError("no response")))
+
+    def test_unexpected_transport_construction_error_falls_back(self):
+        cfg = make_config(fallbacks=("fb",))
+        client = VisionClient(cfg)
+        fake = FakeTransport([])
+        calls = {"n": 0}
+
+        def transport_for(provider):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ValueError("bad config")
+            return fake
+
+        client._transport_for = transport_for
+        self.assertEqual(client.complete([{"role": "user"}], model="prim"), "ok")
+        self.assertEqual([c[1] for c in fake.calls], ["fb"])
+
+    def test_close_releases_hf_and_openrouter_clients(self):
+        cfg = make_config(openrouter_api_key="sk-test")
+        hf = mock.Mock()
+        client = VisionClient(cfg, client=hf)
+        transport = client._transport_for("openrouter")
+        with mock.patch.object(transport._http, "close") as or_close:
+            client.close()
+        hf.close.assert_called_once()
+        or_close.assert_called_once()
+
+    def test_close_without_openrouter_or_closable_hf_client(self):
+        client = VisionClient(make_config(), client=object())
+        client.close()  # no OpenRouter transport, HF client has no close()
+
 
 class RetryTests(unittest.TestCase):
     def test_retries_then_succeeds(self):
@@ -227,7 +289,11 @@ class RetryTests(unittest.TestCase):
         with mock.patch.object(time, "sleep") as sleep:
             client.complete([{"role": "user"}], model="prim")
         sleeps = [c.args[0] for c in sleep.call_args_list]
-        self.assertEqual(sleeps, [2.0, 4.0])  # backoff * 2**attempt
+        # Equal jitter: half the exponential delay is fixed, half random.
+        self.assertGreaterEqual(sleeps[0], 1.0)
+        self.assertLessEqual(sleeps[0], 2.0)
+        self.assertGreaterEqual(sleeps[1], 2.0)
+        self.assertLessEqual(sleeps[1], 4.0)
 
     def test_retries_exhausted_then_fallback_used(self):
         # The full policy interplay: retry the primary model *then* escalate
@@ -240,6 +306,66 @@ class RetryTests(unittest.TestCase):
             result = client.complete([{"role": "user"}], model="prim")
         self.assertEqual(result, "ok")
         self.assertEqual([c[1] for c in fake.calls], ["prim", "prim", "prim", "fb"])
+
+    def test_retry_after_header_honored(self):
+        cfg = make_config(retries=1, retry_backoff=1.0)
+        client = VisionClient(cfg)
+        request = httpx.Request("POST", "https://x")
+        limited = httpx.HTTPStatusError(
+            "err",
+            request=request,
+            response=httpx.Response(
+                429, headers={"Retry-After": "5"}, request=request
+            ),
+        )
+        fake = FakeTransport([limited])
+        attach(fake, client)
+        with mock.patch.object(time, "sleep") as sleep:
+            result = client.complete_with_meta([{"role": "user"}], model="prim")
+        self.assertEqual(result.text, "ok")
+        delay = sleep.call_args.args[0]
+        self.assertGreaterEqual(delay, 2.5)  # max(exponential, Retry-After) / 2
+        self.assertLessEqual(delay, 5.0)
+
+    def test_failure_reports_retry_and_latency_metadata(self):
+        cfg = make_config(retries=2)
+        client = VisionClient(cfg)
+        fake = FakeTransport([_http_error(429), _http_error(429), _http_error(429)])
+        attach(fake, client)
+        with mock.patch.object(time, "sleep"):
+            with self.assertRaises(InferenceError) as ctx:
+                client.complete([{"role": "user"}], model="prim")
+        self.assertEqual(ctx.exception.retries, 2)
+        self.assertGreaterEqual(ctx.exception.latency_s, 0.0)
+        self.assertFalse(ctx.exception.deadline_exceeded)
+
+    def test_deadline_caps_request_timeout(self):
+        cfg = make_config(timeout=30.0, deadline=5.0)
+        client = VisionClient(cfg)
+        fake = FakeTransport([])
+        attach(fake, client)
+        client.complete([{"role": "user"}], model="prim")
+        self.assertLessEqual(fake.timeouts[0], 5.0)
+        self.assertGreater(fake.timeouts[0], 0.0)
+
+    def test_deadline_stops_retries_and_fallbacks(self):
+        cfg = make_config(
+            retries=1, deadline=5.0, retry_backoff=1.0, fallbacks=("fb",)
+        )
+        client = VisionClient(cfg)
+        fake = FakeTransport([_http_error(429), RawResult(text="fb ok")])
+        attach(fake, client)
+        # attempt start: budget left; post-failure: no time to retry; the
+        # fallback candidate then sees an exhausted budget.
+        remaining = mock.patch(
+            "look_n_see.client._remaining", side_effect=[1.0, 0.0, 0.0]
+        )
+        with remaining, mock.patch.object(time, "sleep") as sleep:
+            with self.assertRaises(InferenceError) as ctx:
+                client.complete([{"role": "user"}], model="prim")
+        self.assertTrue(ctx.exception.deadline_exceeded)
+        self.assertEqual(len(fake.calls), 1)  # fallback never started
+        self.assertEqual(sleep.call_count, 0)
 
     def test_retries_exhausted_raises(self):
         cfg = make_config(retries=1)
@@ -419,6 +545,30 @@ class HfTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(InferenceError, "no choices"):
             client._hf.chat_completion([], "m", 64)
 
+    def test_hf_transport_tolerates_client_without_timeout_attr(self):
+        class BareClient:
+            def __init__(self):
+                self.calls = []
+
+            def chat_completion(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content="hi"),
+                            finish_reason="stop",
+                        )
+                    ],
+                    usage=None,
+                )
+
+        cfg = make_config()
+        bare = BareClient()
+        client = VisionClient(cfg, client=bare)
+        result = client._hf.chat_completion([], "m", 64, timeout=2.0)
+        self.assertEqual(result.text, "hi")
+        self.assertFalse(hasattr(bare, "timeout"))
+
     def test_hf_usage_dict_is_preserved(self):
         response = SimpleNamespace(
             choices=[
@@ -525,7 +675,7 @@ class DefaultModelTests(unittest.TestCase):
 
 class ErrorHelpersTests(unittest.TestCase):
     def test_is_retryable_statuses(self):
-        for status in (429, 500, 502, 503, 504):
+        for status in (408, 425, 429, 500, 502, 503, 504, 529):
             self.assertTrue(_is_retryable(_http_error(status)), status)
         self.assertFalse(_is_retryable(_http_error(401)))
 
@@ -546,8 +696,9 @@ class ErrorHelpersTests(unittest.TestCase):
         self.assertFalse(_is_retryable(ValueError("bad")))
 
     def test_non_retryable_status_boundaries(self):
-        # Policy boundary: only 429 and 5xx-gateway/availability statuses retry.
-        for status in (400, 401, 408, 501, 505):
+        # Policy boundary: request-timeout, overload, and gateway/availability
+        # statuses retry; other 4xx/5xx are terminal.
+        for status in (400, 401, 501, 505):
             with self.subTest(status=status):
                 self.assertFalse(_is_retryable(_http_error(status)), status)
 
@@ -586,7 +737,7 @@ class ErrorHelpersTests(unittest.TestCase):
         real = client._hf
         attempts = {"n": 0}
 
-        def flaky_chat_completion(messages, model, max_tokens):
+        def flaky_chat_completion(messages, model, max_tokens, timeout=None):
             attempts["n"] += 1
             if attempts["n"] == 1:
                 raise httpx.ConnectError(

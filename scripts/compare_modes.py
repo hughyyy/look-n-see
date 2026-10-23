@@ -61,12 +61,11 @@ def select_images(dir_: str, pattern: str, limit: int) -> list[str]:
         return []
     if limit <= 0 or limit >= len(paths):
         return paths
-    stride = max(1, len(paths) // limit)
-    sample = paths[::stride][:limit]
-    # Ensure the final image is included when the stride overshoots.
-    if len(sample) < limit and paths[-1] not in sample:
-        sample = sample + [paths[-1]]
-    return sample[:limit]
+    if limit == 1:
+        return [paths[0]]
+    # Evenly spaced sample that always includes the final image.
+    indexes = [(i * (len(paths) - 1)) // (limit - 1) for i in range(limit)]
+    return [paths[i] for i in sorted(set(indexes))]
 
 
 def run_one(dispatcher: OcrDispatcher, client: VisionClient, path: str, mode: str) -> dict:

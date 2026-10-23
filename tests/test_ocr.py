@@ -73,8 +73,9 @@ class MistralOcrTests(unittest.TestCase):
             "/ocr",
             json={
                 "model": "mistral-ocr-latest",
-                "document": {"type": "document_url", "document_url": PNG_DATA_URI},
+                "document": {"type": "image_url", "image_url": PNG_DATA_URI},
             },
+            timeout=5.0,
         )
         self.assertEqual(result["text"], "line one\n\nline two")
         self.assertEqual(result["engine"], "mistral")
@@ -193,7 +194,12 @@ class MistralOcrTests(unittest.TestCase):
             with mock.patch("look_n_see.ocr.time.sleep") as sleep:
                 with self.assertRaises(OcrError):
                     engine.extract(PNG_DATA_URI)
-        self.assertEqual([c.args[0] for c in sleep.call_args_list], [0.25, 0.5])
+        sleeps = [c.args[0] for c in sleep.call_args_list]
+        # Equal jitter: half the exponential delay is fixed, half random.
+        self.assertGreaterEqual(sleeps[0], 0.125)
+        self.assertLessEqual(sleeps[0], 0.25)
+        self.assertGreaterEqual(sleeps[1], 0.25)
+        self.assertLessEqual(sleeps[1], 0.5)
 
     def test_negative_retries_still_attempts_once(self):
         cfg = Config(
@@ -557,3 +563,62 @@ class DispatcherTests(unittest.TestCase):
         with mock.patch.object(dispatcher, "_engine", return_value=engine):
             with self.assertRaisesRegex(OcrError, "engine exploded"):
                 dispatcher.extract(PNG_DATA_URI)
+
+    def test_close_closes_http_client(self):
+        engine = MistralOcr(CFG)
+        with mock.patch.object(engine._http, "close") as close:
+            engine.close()
+        close.assert_called_once()
+
+    def test_deadline_exceeded_before_request(self):
+        engine = MistralOcr(CFG)
+        with mock.patch("look_n_see.ocr._remaining", return_value=0.0):
+            with self.assertRaisesRegex(OcrError, "deadline exceeded"):
+                engine.extract(PNG_DATA_URI)
+
+
+class LifecycleTests(unittest.TestCase):
+    def test_dispatcher_close_closes_cached_engines(self):
+        dispatcher = OcrDispatcher(CFG, vision_client=FakeClient())
+        engine = mock.Mock()
+        dispatcher._engines["vlm"] = engine
+        dispatcher.close()
+        engine.close.assert_called_once()
+        self.assertEqual(dispatcher._engines, {})
+
+    def test_dispatcher_close_closes_owned_vision_client(self):
+        with mock.patch("look_n_see.ocr.VisionClient") as vision_client:
+            dispatcher = OcrDispatcher(CFG)
+            dispatcher.close()
+        vision_client.return_value.close.assert_called_once()
+
+    def test_dispatcher_close_tolerates_engine_without_close(self):
+        dispatcher = OcrDispatcher(CFG, vision_client=FakeClient())
+        dispatcher._engines["vlm"] = object()
+        dispatcher.close()  # no close() attribute -> skipped
+
+    def test_mistral_deadline_disabled_skips_budget(self):
+        cfg = Config(**{**CFG.__dict__, "deadline": 0})
+        engine = MistralOcr(cfg)
+        with mock.patch.object(engine._http, "post", return_value=_FakeResponse()) as post:
+            result = engine.extract(PNG_DATA_URI)
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(result["pages"], 2)
+
+    def test_mistral_skips_retry_when_delay_exceeds_budget(self):
+        cfg = Config(**{**CFG.__dict__, "retries": 1, "retry_backoff": 1.0})
+        engine = MistralOcr(cfg)
+        error = _FakeResponse(status_code=429, json_data={"error": {"message": "slow"}})
+        remaining = mock.patch("look_n_see.ocr._remaining", side_effect=[1.0, 0.0])
+        with remaining, mock.patch.object(
+            engine._http, "post", return_value=error
+        ) as post:
+            with self.assertRaises(OcrError):
+                engine.extract(PNG_DATA_URI)
+        self.assertEqual(post.call_count, 1)
+
+    def test_dispatcher_close_leaves_injected_vision_client_open(self):
+        vision = mock.Mock()
+        dispatcher = OcrDispatcher(CFG, vision_client=vision)
+        dispatcher.close()
+        vision.close.assert_not_called()

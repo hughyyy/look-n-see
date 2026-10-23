@@ -14,7 +14,11 @@ images. See `BRIEF.md` for requirements.
 
 ## Layout
 ```
-pyproject.toml
+pyproject.toml       # metadata, console script, optional `ocr` extra
+LICENSE              # MIT
+.github/workflows/
+  ci.yml             # unittest on push/PR, Python 3.10 + 3.14
+  release.yml        # tag -> test -> build -> GitHub release -> PyPI OIDC
 README.md            # user-facing: tools, install, config, dev
 BRIEF.md             # requirements
 IMPLEMENTATION.md    # this file: design, OMP integration, release plan
@@ -25,23 +29,25 @@ research/
 src/look_n_see/
   __init__.py
   __main__.py        # python -m look_n_see
-  config.py          # env parsing + defaults (incl. OCR roles/engine)
+  config.py          # env parsing + defaults (incl. OCR roles/engine, deadline)
   images.py          # file path / data URI / URL -> (media_type, bytes) -> data URI
-  client.py          # provider clients: retry/backoff, fallback chain
+  client.py          # provider clients: retry/backoff, fallback chain, deadline
   openrouter.py      # OpenRouter chat-completions transport (httpx)
   ocr.py             # OCR dispatcher + vlm/rapidocr/mistral engines
   prompts.py         # default prompts per tool
-  server.py          # MCPServer app + role-gated tool registration + main()
+  sanity.py          # output-shape classifier + degradation annotation
+  server.py          # MCPServer app + role-gated registration + health + main()
 tests/
-  test_images.py
+  test_images.py     # input parsing, caps, URL policy, redirects, media types
   test_prompts.py
   test_openrouter.py
-  test_config.py     # env parsing, provider routing, fallback parsing, OCR roles
-  test_client.py     # retries, fallback chain, transports (mocked)
-  test_ocr.py        # mistral adapter (mocked httpx), dispatcher, engine errors
-  test_server.py     # registration smoke (incl. role gating) + mocked client
-research/
-  ocr-options.md     # OCR engine + distribution-pattern research (2026-10)
+  test_config.py     # env parsing, provider routing, OCR roles, deadline
+  test_client.py     # retries, fallback chain, deadline, cleanup, transports
+  test_ocr.py        # mistral adapter, dispatcher, engine errors, lifecycle
+  test_benchmark.py
+  test_sanity.py     # refusal anchoring, severe flags, annotation
+  test_scripts.py    # harness scripts: sampling, preflight, summaries
+  test_server.py     # registration, schemas, structured errors, stdio handshakes
 ```
 
 ## Config (env vars)
@@ -63,6 +69,8 @@ research/
 | `MISTRAL_API_KEY` | — | auth for the `mistral` OCR engine |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter endpoint |
 | `OPENROUTER_SITE_URL` / `OPENROUTER_APP_NAME` | — | optional `HTTP-Referer` / `X-Title` headers |
+| `VISION_DEADLINE` | `100` | wall-clock budget for one call across retries + fallbacks |
+| `VISION_ALLOW_PRIVATE_URLS` | `0` | allow loopback/private image URLs (SSRF guard; `1` opts in) |
 
 ## Tools (all accept optional prompt to steer output, and optional model)
 1. `describe_image(image, prompt=None, model=None)` — general description.
@@ -70,6 +78,8 @@ research/
 3. `ask_about_image(image, question, model=None)` — Q&A over the image.
 4. `extract_text(image, prompt=None, model=None, engine=None)` — OCR; returns
    `{"text", "engine", ...}` JSON. `engine` overrides `OCR_ENGINE`.
+5. `health()` — JSON report of roles, routing, credential presence, deadline
+   and URL policy; no network call, registered in every variant.
 
 `image` accepts: file path, base64 data URI, or `http(s)://` URL (auto-detect).
 `model` accepts any id in the same syntax as `VISION_MODEL`; omitted = default.
@@ -85,8 +95,11 @@ On failure the call walks the fallback chain (`VISION_FALLBACKS`).
   `OcrError` with an install hint when the `ocr` extra is missing. Handles
   both the 1.2.x `(result, elapse)` tuple and the 1.4.x plain-list shapes.
 - `mistral` engine: `httpx.Client` → `POST /v1/ocr` with Bearer auth,
-  retry/backoff reuse (`_is_retryable` from client), per-page markdown joined.
-  `MISTRAL_API_KEY` required; an `OcrError` otherwise.
+  retry/backoff reuse (`_is_retryable`/`_retry_delay` from client), per-page
+  markdown joined. Images are sent as the documented
+  `{"type": "image_url", "image_url": <data URI>}` document; `document_url`
+  is reserved for PDF/PPTX/DOCX. `MISTRAL_API_KEY` required; an `OcrError`
+  otherwise.
 - Packaging: `[project.optional-dependencies] ocr` pulls rapidocr with env
   markers (`>=1.4` on Python <3.13; `>=1.2` on >=3.13 — 1.4.x declares
   `requires_python <3.13`, verified against PyPI 2026-10-22).
@@ -105,7 +118,11 @@ On failure the call walks the fallback chain (`VISION_FALLBACKS`).
   empty/terse — ported from the vision-collapse classifier), repetition rate,
   flagged samples; writes by-model views + `analysis_prompt.md` for an
   evaluation agent.
-- Benchmark rows disable fallbacks so attribution is exact.
+- Benchmark rows disable fallbacks so attribution is exact, record the image
+  path (plus basename) and retry/latency metadata on failures, and tolerate
+  corrupt/truncated JSONL rows on both resume and summarize. `resume=False`
+  truncates an existing results file instead of appending duplicates.
+  p90 uses nearest-rank; repetition excludes single-rep pairs.
 - Sweep results live under `benchmarks/` (gitignored); verdict: default =
   `openrouter:google/gemma-4-26b-a4b-it` (same model as the old HF default,
   ~2x median / ~3x p90 latency improvement, ~$0.0002/call), with the default
@@ -123,14 +140,27 @@ On failure the call walks the fallback chain (`VISION_FALLBACKS`).
   `clear_session`) is spec'd in `BRIEF.md`, NOT implemented now.
 
 ## Error handling
-- Retry 429/5xx/connection errors with exponential backoff (`VISION_RETRIES`).
-- Invalid, unreadable, or empty image inputs (file, data URI, URL) → descriptive
-  tool error; URL fetches cap the read at `MAX_IMAGE_BYTES + 1` and close
-  `HTTPError` bodies (no tempfile leak).
+- Retry 408/425/429/5xx/529 and connection errors with jittered exponential
+  backoff (`VISION_RETRIES`), honoring a numeric `Retry-After` up to 60 s.
+- One `VISION_DEADLINE` budget spans the retry and fallback chain; each
+  request timeout is `min(VISION_TIMEOUT, remaining)` (HF's client-level
+  timeout is adjusted under a lock because `InferenceClient` has no per-call
+  override).
+- Tool failures are structured: `ToolError` with
+  `{"error": {"type": input|inference|ocr|internal, "exception", "message"}}`,
+  so MCP clients see `isError: true` instead of an ordinary text result.
+- Invalid, unreadable, empty, or non-image inputs (file, data URI, URL) →
+  descriptive tool error; URL fetches cap the read at `MAX_IMAGE_BYTES + 1`,
+  close `HTTPError` bodies, reject non-`image/*` media types, restrict
+  redirects to http(s), refuse private/loopback/link-local hosts unless
+  `VISION_ALLOW_PRIVATE_URLS=1`, and redact userinfo/query strings in errors.
 - Malformed provider responses (non-object JSON, missing `choices`/`pages`,
   non-string content parts) → readable error, not `AttributeError`/`IndexError`.
 - Env edge values: empty model/base URL fall back to defaults; negative retries/
-  backoff clamp to 0; non-positive max tokens/timeout and NaN/inf fall back.
+  backoff clamp to 0; non-positive max tokens/timeout/deadline and NaN/inf fall
+  back; unknown `OCR_ENGINE`/`VISION_PROVIDER` log a warning and fall back.
+- Empty/refusal/generation-payload responses get a warning trailer via
+  `sanity.annotate` (collapse-incident mitigation; see `VISION_SESSION_COLLAPSE.md`).
 
 ## Oh My Pi (OMP) integration
 The server is registered as a user-level MCP server so agents can call it from
@@ -159,65 +189,48 @@ any working directory.
 
 ## Release & packaging plan (parity with scrape-n-search)
 
-**Status: planned — nothing published or configured yet.** Target: mirror
-scrape-n-search's setup — `ci.yml` + `release.yml` GitHub Actions, distribution
-via PyPI with trusted publishing (OIDC, no tokens), and `uvx`/`pipx`
-installability, with release flow fully automated from a tag.
+**Status: implemented in-repo (2026-10-23); external steps remain.** The repo
+now has `LICENSE` (MIT), complete `pyproject.toml` metadata (`readme`,
+`license = "MIT"` + `license-files`, `[project.urls]`, keywords/classifiers,
+setuptools>=77 for PEP 639), `ci.yml`, and `release.yml`.
 
-Facts already checked:
-- GitHub repo `hughyyy/look-n-see` exists (created empty; default branch
-  `main` — local branch renamed from `master` to match).
-- `look-n-see` is available on PyPI (404 today); `look-n-see-mcp` also free as
-  an alternative if the plain name is taken by the time we publish.
-- Tests are stdlib `unittest` with zero dev deps — CI runs `unittest`, not
-  pytest.
+Facts checked:
+- GitHub repo `hughyyy/look-n-see` exists; default branch `main`.
+- `look-n-see` is available on PyPI (404 as of 2026-10); `look-n-see-mcp` is
+  the fallback name.
+- Tests are stdlib `unittest` with zero dev deps — CI runs `unittest`.
+- `python -m build` produces `look_n_see-0.1.0.tar.gz` +
+  `look_n_see-0.1.0-py3-none-any.whl`; wheel METADATA carries
+  `License-Expression: MIT`, `License-File: LICENSE`, both project URLs and the
+  markdown README.
 
-Planned steps, in order:
-
-1. **Add `LICENSE` (MIT)** — same as scrape-n-search. Pending user approval
-   (legal choice).
-2. **pyproject metadata**: add `readme = "README.md"`, `license = "MIT"`,
-   `[project.urls]` (repository → `https://github.com/hughyyy/look-n-see`),
-   keywords/classifiers. Name stays `look-n-see`; `requires-python >=3.10`.
-   The `ocr` extra already exists (env-markered rapidocr) and ships with the
-   single release — no variant-specific distributions.
-3. **`.github/workflows/ci.yml`**: tests on push to `main` + PRs, Python
-   matrix `["3.10", "3.14"]`, steps: checkout → setup-python → `pip install -e .`
-   → `python -m unittest discover -s tests -q`.
-4. **`.github/workflows/release.yml`**: on tag push `v*` — job 1 tests
-   (same as CI), job 2 builds sdist + wheel (`pip install build` → `python -m
-   build`), uploads `dist/` artifact; job 3 creates the GitHub Release with
-   auto-generated notes and attaches artifacts
-   (`gh release create "$GITHUB_REF_NAME" dist/* --generate-notes`);
-   job 4 publishes to PyPI via `pypa/gh-action-pypi-publish@release/v1`
-   (trusted publishing).
-5. **PyPI one-time admin step** (manual, outside the repo): register the
-   trusted publisher for project `look-n-see` → `hughyyy/look-n-see` (workflow
-   `release.yml`, environment `release` if used). Until then the publish job
-   fails with a clear OIDC error, as in scrape-n-search.
-6. **First release**: `git tag v0.1.0 && git push origin v0.1.0`; verify on a
-   clean machine with `uvx look-n-see` (registers as `look-n-see` console
-   script), then point MCP client config at `uvx look-n-see`.
-7. **Optional parity (deferred)**: one-line `install.sh` + `setup.sh`
-   installer like scrape-n-search's (source tarball → user venv → harness
-   registration), and a PyPI classifiers pass.
+Remaining steps:
+1. **PyPI one-time admin**: register the trusted publisher for `look-n-see` →
+   `hughyyy/look-n-see`, workflow `release.yml`, environment `release`.
+2. **First release**: `git tag v0.1.0 && git push origin v0.1.0`; verify
+   `uvx --from 'look-n-see[ocr]' look-n-see` on a clean machine.
+3. **Optional parity (deferred)**: `install.sh`/`setup.sh` installer like
+   scrape-n-search's.
 
 Non-goals for packaging: no Docker image, no npm/JS packaging, no HTTP
 transport — stdio only, per BRIEF.
 
 ## Verification
-- Offline: `compileall`; `python -m unittest discover -s tests -q` (294 tests —
-  image parsing incl. cap/empty/error paths, config incl. OCR roles and invalid
-  env values, prompts, transports, retries/fallback chains, OCR engines with
-  mocked httpx, benchmark resume/symlink refusal, server registration + role
-  gating + tool schemas, and a real stdio handshake per release variant);
-  server starts and registers tools with no live provider call. Branch coverage
-  (`coverage run --branch --source=look_n_see`) is 100% for every module except
-  the two unreachable retry-loop exits and the `__main__` entry point, which is
-  exercised in a subprocess.
+- Offline: `compileall`; `python -m unittest discover -s tests -q` (370 tests —
+  image parsing incl. cap/empty/media/URL policy, config incl. OCR roles,
+  deadline, model normalization and invalid env values, prompts, transports,
+  retries/backoff/jitter/Retry-After, deadline budgeting, fallback chains,
+  OCR engines with mocked httpx, dispatcher/transport lifecycle, benchmark
+  resume/paths/stats, response sanity, harness scripts, server registration +
+  role gating + tool schemas + structured errors, and a real stdio handshake
+  per release variant).
+- Branch coverage (`coverage run --branch --source=look_n_see`) is 100% for
+  every module except the two retry-loop exits and the two `__main__` entry
+  guards; total 99%. Server startup/registration makes no provider call.
 - Live (manual): provider tokens in env (or `omp token <provider>`), then
-  `scripts/live_smoke.py` for vision and the `extract_text` tool for OCR
-  (rapidocr engine = local). Verified 2026-10-22: default vision route,
-  rapidocr + vlm engines, and role-gated registrations over stdio.
+  `scripts/live_smoke.py` (add `--json` for a machine-readable report/exit code)
+  for vision and the `extract_text` tool for OCR (rapidocr engine = local).
+  Verified 2026-10-22: default vision route, rapidocr + vlm engines, and
+  role-gated registrations over stdio. Mistral remains live-untested (no key).
 - A restart of the OMP client re-spawns the server from the editable install,
   so a running session picks up new tool registrations without config changes.

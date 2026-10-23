@@ -17,12 +17,13 @@ metadata) so the calling model can act on it.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import Any
 
 import httpx
 
-from .client import VisionClient, _describe_error, _is_retryable
+from .client import VisionClient, _describe_error, _is_retryable, _remaining, _retry_delay
 from .config import Config
 from .images import load_image
 from .prompts import OCR_DEFAULT, build_messages
@@ -57,6 +58,9 @@ class VlmOcr:
             "text": self._client.complete(messages, model=model),
             "engine": self.name,
         }
+
+    def close(self) -> None:
+        """The vision client is owned by the dispatcher/server."""
 
 
 try:  # The rapidocr extra is optional; degrade gracefully when absent.
@@ -106,9 +110,16 @@ class RapidOcrEngine:
             "items": items,
         }
 
+    def close(self) -> None:
+        """RapidOCR holds ONNX sessions without an explicit close API."""
+
 
 class MistralOcr:
-    """Dedicated cloud OCR via Mistral's OpenAI-adjacent REST API (httpx-only)."""
+    """Dedicated cloud OCR via Mistral's REST API (httpx-only).
+
+    Images (the tool's only input kind) use the documented `image_url`
+    document type; `document_url` is reserved for PDF/PPTX/DOCX.
+    """
 
     name = "mistral"
 
@@ -125,17 +136,31 @@ class MistralOcr:
             timeout=config.timeout,
         )
 
+    def close(self) -> None:
+        """Release the underlying HTTP connection pool."""
+        self._http.close()
+
     def extract(
         self, uri: str, *, prompt: str | None = None, model: str | None = None
     ) -> dict[str, Any]:
         payload = {
             "model": model or DEFAULT_MISTRAL_MODEL,
-            "document": {"type": "document_url", "document_url": uri},
+            "document": {"type": "image_url", "image_url": uri},
         }
+        deadline_at = (
+            time.monotonic() + self.config.deadline if self.config.deadline > 0 else None
+        )
         last_error: Exception | None = None
-        for attempt in range(max(0, self.config.retries) + 1):
+        attempts = max(0, self.config.retries) + 1
+        for attempt in range(attempts):
+            remaining = _remaining(deadline_at)
+            if remaining is not None and remaining <= 0:
+                raise OcrError("mistral OCR deadline exceeded")
+            request_timeout = self.config.timeout
+            if remaining is not None:
+                request_timeout = max(0.05, min(request_timeout, remaining))
             try:
-                response = self._http.post("/ocr", json=payload)
+                response = self._http.post("/ocr", json=payload, timeout=request_timeout)
                 if response.status_code >= 400:
                     raise httpx.HTTPStatusError(
                         f"Mistral OCR returned {response.status_code}",
@@ -166,7 +191,11 @@ class MistralOcr:
                 last_error = exc
                 if not _is_retryable(exc) or attempt >= self.config.retries:
                     break
-                time.sleep(max(0.0, self.config.retry_backoff) * (2**attempt))
+                delay = _retry_delay(exc, attempt, self.config.retry_backoff)
+                remaining = _remaining(deadline_at)
+                if remaining is not None and delay >= remaining:
+                    break
+                time.sleep(delay)
         raise OcrError(_describe_error(last_error))
 
 
@@ -175,8 +204,22 @@ class OcrDispatcher:
 
     def __init__(self, config: Config, vision_client: VisionClient | None = None):
         self.config = config
+        self._owns_vision = vision_client is None
         self._vision = vision_client or VisionClient(config)
         self._engines: dict[str, Any] = {}
+        self._engines_lock = threading.Lock()
+
+    def close(self) -> None:
+        """Close engine HTTP clients and the owned vision client."""
+        with self._engines_lock:
+            engines = list(self._engines.values())
+            self._engines.clear()
+        for engine in engines:
+            close = getattr(engine, "close", None)
+            if callable(close):
+                close()
+        if self._owns_vision:
+            self._vision.close()
 
     def _engine(self, name: str | None) -> Any:
         engine_name = (name or self.config.ocr_engine).strip().lower()
@@ -184,16 +227,17 @@ class OcrDispatcher:
             raise OcrError(
                 f"unknown OCR engine: {engine_name!r} (choose from {', '.join(OCR_ENGINES)})"
             )
-        cached = self._engines.get(engine_name)
-        if cached is None:
-            if engine_name == "vlm":
-                cached = VlmOcr(self._vision)
-            elif engine_name == "rapidocr":
-                cached = RapidOcrEngine()
-            else:
-                cached = MistralOcr(self.config)
-            self._engines[engine_name] = cached
-        return cached
+        with self._engines_lock:
+            cached = self._engines.get(engine_name)
+            if cached is None:
+                if engine_name == "vlm":
+                    cached = VlmOcr(self._vision)
+                elif engine_name == "rapidocr":
+                    cached = RapidOcrEngine()
+                else:
+                    cached = MistralOcr(self.config)
+                self._engines[engine_name] = cached
+            return cached
 
     def extract(
         self,

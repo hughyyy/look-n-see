@@ -17,13 +17,15 @@ serverless route), with an automatic fallback chain to
 ## Release variants
 
 One package, one release — the tool surface is selected at startup by two env
-flags (`tools/list` advertises exactly what is registered):
+flags (`tools/list` advertises exactly what is registered). A `health` tool is
+always registered and reports the active roles/configuration without a network
+call:
 
 | Variant | Install | Env |
 | --- | --- | --- |
 | **Both (default)** | `pip install 'look-n-see[ocr]'` (or `uvx --from 'look-n-see[ocr]' look-n-see`) | *(defaults)* |
 | Vision only | `pip install look-n-see` | `OCR_ENABLED=0` |
-| OCR only | `pip install 'look-n-see[ocr]'` | `VISION_ENABLED=0` |
+| OCR only | `pip install look-n-see` (add `[ocr]` only for the local `rapidocr` engine) | `VISION_ENABLED=0` |
 
 The `ocr` extra pulls the local RapidOCR engine (ONNX, no torch). Dedicated
 `look-n-see-vision` / `look-n-see-ocr` console scripts remain a possible future
@@ -41,6 +43,14 @@ environment-driven (see below).
 | `analyze_screenshot` | `image` (required), `prompt`?, `model`? — UI/state analysis of a screenshot for an agent. |
 | `ask_about_image` | `image`, `question` (required), `model`? — Q&A over the image. |
 | `extract_text` | `image` (required), `prompt`?, `model`?, `engine`? — OCR. Returns `{"text", "engine", ...}`. |
+| `health` | no arguments — JSON report of enabled roles, model/engine routing, credential presence, deadline/URL policy. No network call. |
+
+Failures are structured: a tool error returns `isError: true` with a JSON body
+`{"error": {"type": "input|inference|ocr|internal", "exception": "...", "message": "..."}}`.
+Successful vision answers are prose; `extract_text` and `health` return JSON.
+Responses that look like provider/session degradation (empty, refusal, image-
+generation payload) get a `[look-n-see warning: ...]` trailer so the caller can
+retry or restart the server.
 
 Model ids are provider-routed: `openrouter:<slug>` → OpenRouter,
 `hf:<id>`/bare → HuggingFace Inference (`VISION_PROVIDER=openrouter` flips bare
@@ -118,19 +128,27 @@ the `!` lines and export `HF_TOKEN`/`OPENROUTER_API_KEY` before launching.
 | `MISTRAL_API_KEY` | — | auth for the `mistral` OCR engine |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter endpoint |
 | `OPENROUTER_SITE_URL` / `OPENROUTER_APP_NAME` | — | optional `HTTP-Referer` / `X-Title` headers |
+| `VISION_DEADLINE` | `100` | wall-clock budget (s) for one tool call across retries and fallbacks; per-request timeouts are derived from the remaining budget |
+| `VISION_ALLOW_PRIVATE_URLS` | `0` | allow image URLs on loopback/private/link-local addresses (SSRF guard; `1` opts in) |
 
 ## How it works
 
-The server normalizes every image input to a data URI, builds one chat message
-(image + prompt) per tool call, and hands it to `VisionClient` — a pure function of
-the message list, which is the seam for future session-state work. The client
-routes per model id (`openrouter:` vs `hf:`/bare), retries with exponential
-backoff, and walks the fallback chain on hard failure. The OCR tool routes through
-an `OcrDispatcher` with the same image normalization: the `vlm` engine reuses the
-vision client, `rapidocr` decodes locally via ONNX, and `mistral` posts the data
-URI to Mistral's OCR API. Stateless by design: no session history is kept between
-calls, and `VISION_ENABLED`/`OCR_ENABLED` decide at startup which tools
-`tools/list` advertises.
+The server validates and normalizes every image input to a data URI (file path,
+`data:` URI, or `http(s)` URL — non-image media types are rejected, URL fetches
+are bounded and restricted to public hosts by default), builds one chat message
+(image + prompt) per tool call, and hands it to `VisionClient` — a pure function
+of the message list, which is the seam for future session-state work. The client
+routes per model id (`openrouter:` vs `hf:`/bare, prefix matching is case- and
+whitespace-insensitive), retries with jittered exponential backoff honoring
+`Retry-After`, walks the fallback chain on hard failure, and stops when the
+per-call deadline is exhausted. The OCR tool routes through an `OcrDispatcher`
+with the same image normalization: the `vlm` engine reuses the vision client,
+`rapidocr` decodes locally via ONNX, and `mistral` posts the data URI to
+Mistral's OCR API as an `image_url` document. Response-shape classification
+(`sanity.py`) flags empty/refusal/generation-payload answers for the caller.
+Stateless by design: no session history is kept between calls, and
+`VISION_ENABLED`/`OCR_ENABLED` decide at startup which tools `tools/list`
+advertises.
 
 ## Development
 
@@ -150,7 +168,9 @@ degrade — restart the process to recover).
 
 ## Releases & packaging
 
-**Status: planned, not yet set up** — intended to mirror scrape-n-search's setup
-(CI + tag-triggered release to GitHub and PyPI via trusted publishing). The
-concrete plan is in `IMPLEMENTATION.md` ("Release & packaging plan"); nothing is
-published or configured yet.
+**Status: implemented in-repo (2026-10-23)** — MIT `LICENSE`, complete
+`pyproject.toml` metadata, `.github/workflows/ci.yml` (tests on Python
+3.10/3.14) and `.github/workflows/release.yml` (test → build → GitHub release
+→ PyPI trusted publishing). Remaining steps are external: register the PyPI
+trusted publisher once, then `git tag v0.1.0 && git push origin v0.1.0`.
+Nothing is published yet.
